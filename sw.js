@@ -1,4 +1,7 @@
-const CACHE = 'portfolio-v1';
+// Cache name is app-specific on purpose. The activate handler deletes every cache
+// whose name differs, so renaming this is what evicts a previous app's shell if one
+// was ever served from the same origin (e.g. localhost during development).
+const CACHE = 'folio-v1';
 
 const PRECACHE = [
   './',
@@ -6,15 +9,16 @@ const PRECACHE = [
   'manifest.json',
 ];
 
-// Dynamic data hosts — always bypass cache
+// Live data and auth — never cached. Drive in particular MUST bypass: caching a
+// GET of the user's document would let a stale copy be served back as if current,
+// silently defeating the revision check that protects against lost edits.
 const BYPASS = [
-  'docs.google.com',
-  'script.google.com',
-  'corsproxy.io',
-  'query1.finance.yahoo.com',
-  'query2.finance.yahoo.com',
-  'finance.yahoo.com',
-  'fonts.googleapis.com',
+  'googleapis.com',          // Drive appData read/write + userinfo
+  'accounts.google.com',     // Google Identity Services
+  'stockanalysis.com',       // history, dividends, earnings, quotes
+  'quote.cnbc.com',          // batched live quotes
+  'open.er-api.com',         // FX rate
+  'raw.githubusercontent.com', // GICS sector map (has its own localStorage TTL)
 ];
 
 self.addEventListener('install', e => {
