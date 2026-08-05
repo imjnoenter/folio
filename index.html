@@ -11652,10 +11652,12 @@ async function _idbSet(k, v) {
   } catch (_) {}
 }
 
-// 5Y daily closes + the full dividend series for one symbol. Stocks and ETFs are on
-// separate routes, so try both. `a` is the adjusted close — used because every return
-// calculation downstream assumes splits/dividends are already folded in.
-async function fetchSaHistory(sym) {
+// 5Y daily closes + (optionally) the full dividend series for one symbol. Stocks and
+// ETFs are on separate routes, so try both. `a` is the adjusted close — used because
+// every return calculation downstream assumes splits/dividends are already folded in.
+// `withDividends: false` skips the second request entirely for symbols nothing reads
+// dividends for (benchmarks, sold-out tickers) — see ensureHistory.
+async function fetchSaHistory(sym, { withDividends = true } = {}) {
   const s = String(sym || '').trim().toLowerCase();
   if (!s || s.startsWith('^')) return null;
   let prices = null;
@@ -11677,16 +11679,18 @@ async function fetchSaHistory(sym) {
   if (!prices) return null;
 
   const dividends = {};
-  try {
-    const r = await fetch(`https://stockanalysis.com/api/symbol/s/${encodeURIComponent(s)}/dividend`);
-    if (r.ok) {
-      const j = await r.json();
-      for (const d of (j?.data?.history || [])) {
-        const amt = parseFloat(String(d.amt || '').replace(/[^0-9.]/g, ''));
-        if (d.dt && amt > 0) dividends[d.dt] = amt;
+  if (withDividends) {
+    try {
+      const r = await fetch(`https://stockanalysis.com/api/symbol/s/${encodeURIComponent(s)}/dividend`);
+      if (r.ok) {
+        const j = await r.json();
+        for (const d of (j?.data?.history || [])) {
+          const amt = parseFloat(String(d.amt || '').replace(/[^0-9.]/g, ''));
+          if (d.dt && amt > 0) dividends[d.dt] = amt;
+        }
       }
-    }
-  } catch (_) {}
+    } catch (_) {}
+  }
 
   return { prices, dividends, fetchedAt: Date.now() };
 }
@@ -11702,8 +11706,15 @@ async function readHistory() {
 }
 
 // Warm _histMem from IndexedDB, then fetch whatever is missing or a day stale.
-// Sequential with a small delay — stockanalysis has no batch endpoint and hammering
-// it with 50 parallel requests is how an IP gets blocked.
+// stockanalysis has no batch endpoint, so a bounded worker pool (5 in flight) fetches
+// stale symbols concurrently — fast enough for a ~50-symbol portfolio without the
+// full-parallel hammering that risks an IP block. Dividends are only fetched for
+// symbols ever held — current holdings UNION every ticker that appears in transaction
+// history (see fetchSaHistory's withDividends). A fully-sold-out ticker still paid
+// real dividends during its holding window, and computeDividends/computeIRR do a
+// HISTORICAL holdings check (sharesHeldAt), not a current one — so it must not be
+// dropped. Only a pure benchmark the user has never traded (typically SPY/QQQ) skips
+// the dividend leg.
 async function ensureHistory(tickers, { warmOnly = false } = {}) {
   const want = [...new Set((tickers || []).filter(t => t && !t.startsWith('^')))];
   for (const tk of want) {
@@ -11713,11 +11724,20 @@ async function ensureHistory(tickers, { warmOnly = false } = {}) {
   }
   if (warmOnly) return 0;
   const stale = want.filter(tk => !_histMem[tk] || (Date.now() - (_histMem[tk].fetchedAt || 0)) > HIST_TTL);
-  for (const tk of stale) {
-    const h = await fetchSaHistory(tk);
-    if (h) { _histMem[tk] = h; _idbSet(tk, h); }
-    await new Promise(r => setTimeout(r, 120));
+  const divWanted = new Set([
+    ...(_doc?.holdings || []).map(h => h.symbol),
+    ...(_doc?.transactions || []).map(t => t.ticker),
+  ].filter(Boolean));
+  const CONCURRENCY = 5;
+  let cursor = 0;
+  async function worker() {
+    while (cursor < stale.length) {
+      const tk = stale[cursor++];
+      const h = await fetchSaHistory(tk, { withDividends: divWanted.has(tk) });
+      if (h) { _histMem[tk] = h; _idbSet(tk, h); }
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, stale.length) }, worker));
   return stale.length;
 }
 
