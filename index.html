@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>Portfolio</title>
+<title>Portfolio Tracker</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#3a2a1c">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -208,6 +208,34 @@
   --btn-fg: #211912;
   --spark-ok: #8aa978;
   --logo-bg: #36281c;
+}
+
+/* ── Sign-in gate: an inverted surface that stays dark in all four themes.
+   Tone (warm/cool) shifts it; light/dark does not, because the gate is the night
+   room you pass through before the app takes on your theme. ── */
+:root {
+  --gate-ground: #241a10;
+  --gate-ground-2: #2f2216;
+  --gate-ink: #f4ead6;
+  --gate-ink-soft: #cbb695;
+  --gate-muted: #9a8365;
+  --gate-line: rgba(244,234,214,.13);
+  --gate-line-2: rgba(244,234,214,.24);
+  --gate-accent: #d4825e;
+  --gate-gain: #8aa978;
+  --gate-loss: #d56b58;
+}
+[data-tone="cool"] {
+  --gate-ground: #152325;
+  --gate-ground-2: #1d2f31;
+  --gate-ink: #dcebe9;
+  --gate-ink-soft: #a8c2c0;
+  --gate-muted: #8a9ea1;
+  --gate-line: rgba(220,235,233,.13);
+  --gate-line-2: rgba(220,235,233,.24);
+  --gate-accent: #7ab2c6;
+  --gate-gain: #9ab8a3;
+  --gate-loss: #d08a90;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1882,6 +1910,211 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .account-menu-divider { height: 1px; background: var(--line); margin: 3px 0; }
 .account-menu-item.danger:hover { background: rgba(187,77,60,.08); color: var(--loss); }
 @media (max-width:700px) { .account-pill span:not(.ap-dot) { display: none; } .account-pill { padding: 5px 8px; gap: 0; } }
+
+/* ── Sign-in gate: masthead + tape ──────────────────────────────────────────
+   The gate is always the inverted --gate-* surface (see token block above),
+   never the app's own light/dark tokens — it is the room you pass through
+   before the app takes on your theme. */
+.gate {
+  min-height: 100vh; min-height: 100dvh;
+  display: flex; flex-direction: column;
+  background: var(--gate-ground); color: var(--gate-ink);
+  background-image:
+    radial-gradient(circle at 14% 6%, color-mix(in oklab, var(--gate-accent) 10%, transparent), transparent 42%),
+    radial-gradient(circle at 90% 80%, color-mix(in oklab, var(--gate-accent) 6%, transparent), transparent 48%);
+  padding: max(var(--sp-6), env(safe-area-inset-top)) max(var(--sp-6), env(safe-area-inset-right))
+           max(var(--sp-6), env(safe-area-inset-bottom)) max(var(--sp-6), env(safe-area-inset-left));
+  font-family: var(--font-ui);
+}
+
+/* Rail: imprint mark + wordmark, language toggle, hairline rule (drawn on load) */
+.gate-rail {
+  position: relative;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-4);
+  padding-bottom: var(--sp-4); margin-bottom: var(--sp-8);
+}
+.gate-rail::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+  background: var(--gate-line); transform-origin: left; transform: scaleX(1);
+}
+.gate-mark-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.gate-mark { color: var(--gate-ink); flex-shrink: 0; }
+.gate-wordmark {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  letter-spacing: .18em; text-transform: uppercase; color: var(--gate-ink-soft);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.gate-lang.lang-toggle { border: 1px solid var(--gate-line-2); flex-shrink: 0; }
+.gate-lang .lang-seg { color: var(--gate-muted); }
+.gate-lang .lang-seg.active { background: var(--gate-ink); color: var(--gate-ground); }
+.gate-lang .lang-seg:not(.active):hover { background: var(--gate-ground-2); color: var(--gate-ink); }
+
+/* Body: nameplate + actions (left) beside the specimen tape (right), bottom-anchored */
+.gate-body {
+  flex: 1;
+  display: grid; grid-template-columns: 1fr; align-items: end;
+  gap: var(--sp-8);
+}
+@media (min-width: 900px) {
+  .gate-body { grid-template-columns: minmax(320px, 1fr) minmax(380px, 1.25fr); gap: var(--sp-9); }
+}
+.gate-left, .gate-right { min-width: 0; }
+
+.gate-name {
+  font-family: var(--font-display); font-weight: 600;
+  font-size: clamp(3rem, 9vw, 6rem); line-height: .92; letter-spacing: -0.03em;
+}
+[data-lang="TH"] .gate-name {
+  /* Kanit is a sans at architectural scale — tighten line-height, ease off the
+     negative tracking so it doesn't collide with itself on two lines. */
+  font-size: clamp(2.3rem, 7vw, 4.4rem); line-height: 1.18; letter-spacing: -0.01em;
+}
+.gate-name-rule {
+  width: 3.5rem; height: 1px; background: var(--gate-line-2);
+  transform-origin: left; margin: var(--sp-4) 0 var(--sp-5);
+}
+.gate-lede {
+  font-family: var(--font-ui); font-size: 15px; line-height: 1.6;
+  color: var(--gate-ink-soft); max-width: 42ch; margin: 0 0 var(--sp-6);
+}
+
+.gate-accounts { margin-bottom: var(--sp-5); }
+.gate-accounts-label {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .14em; color: var(--gate-muted);
+  margin-bottom: var(--sp-2);
+}
+.gate-account-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; margin-bottom: 6px; border-radius: var(--radius-sm);
+  background: transparent; border: 1px solid transparent; color: var(--gate-ink);
+  cursor: pointer; text-align: left; font-family: var(--font-ui);
+  transition: background .15s, border-color .15s;
+}
+.gate-account-row:hover { background: var(--gate-ground-2); border-color: var(--gate-line); }
+.gate-account-avatar {
+  width: 26px; height: 26px; border-radius: 50%; overflow: hidden; flex-shrink: 0;
+  background: var(--gate-ground-2); display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: var(--gate-ink-soft);
+}
+.gate-account-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.gate-account-text { min-width: 0; overflow: hidden; }
+.gate-account-name { display: block; font-size: 12px; font-weight: 700; color: var(--gate-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gate-account-email { display: block; font-size: 10.5px; color: var(--gate-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.gate-actions { display: flex; gap: 12px; }
+.gate-btn {
+  height: 48px; padding: 0 26px; border-radius: var(--radius-pill);
+  font-family: var(--font-ui); font-size: 13.5px; font-weight: 600;
+  cursor: pointer; white-space: nowrap; border: 1px solid transparent;
+  transition: transform .15s var(--ease-out-quint), opacity .15s, background .15s, border-color .15s;
+}
+.gate-btn:hover { transform: translateY(-1px); }
+.gate-btn:active { transform: translateY(0); }
+.gate-btn:disabled { opacity: .6; pointer-events: none; transform: none; }
+.gate-btn-primary { background: var(--gate-ink); color: var(--gate-ground); }
+.gate-btn-primary:hover { opacity: .92; }
+.gate-btn-ghost { background: transparent; color: var(--gate-ink); border-color: var(--gate-line-2); }
+.gate-btn-ghost:hover { background: var(--gate-ground-2); border-color: var(--gate-ink-soft); }
+.gate-noclient {
+  font-size: 12px; color: var(--gate-loss);
+  background: color-mix(in oklab, var(--gate-loss) 14%, transparent);
+  padding: var(--sp-4); border-radius: var(--radius-sm); line-height: 1.5;
+}
+.gate-noclient code { font-family: var(--font-mono); }
+@media (max-width: 559px) {
+  .gate-actions { flex-direction: column; }
+  .gate-btn { width: 100%; }
+}
+
+/* Specimen tape: hairline rows, no card, no shadow */
+.gate-table-label {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .14em; color: var(--gate-muted);
+  margin-bottom: var(--sp-3);
+}
+.gate-table { width: 100%; border-collapse: collapse; }
+.gate-table th {
+  text-align: left; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  color: var(--gate-muted); text-transform: uppercase; letter-spacing: .1em; padding-bottom: 8px;
+}
+.gate-table th.gate-num { text-align: right; }
+.gate-table td { padding: 9px 0; border-top: 1px solid var(--gate-line); font-size: 13px; }
+.gate-table tbody tr:first-child td { border-top: none; }
+.gate-sym { font-family: var(--font-ui); font-weight: 600; color: var(--gate-ink); }
+.gate-name-cell { color: var(--gate-muted); font-size: 12px; }
+.gate-num { text-align: right; font-variant-numeric: tabular-nums; }
+.gate-qtyavg { font-family: var(--font-mono); font-size: 11.5px; color: var(--gate-muted); }
+.gate-last { font-family: var(--font-mono); color: var(--gate-ink); }
+.gate-ret { font-family: var(--font-mono); font-weight: 600; }
+.gate-ret.gate-gain { color: var(--gate-gain); }
+.gate-ret.gate-loss { color: var(--gate-loss); }
+.gate-total-row td { border-top: 1px solid var(--gate-line-2); padding-top: 12px; font-weight: 700; }
+.gate-total-row .gate-sym {
+  font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--gate-ink-soft); font-weight: 700;
+}
+.gate-sample-note { font-size: 11px; color: var(--gate-muted); margin-top: var(--sp-3); }
+@media (max-width: 559px) {
+  .gate-col-name, .gate-col-qtyavg { display: none; }
+}
+@media (max-width: 719px) and (min-width: 560px) {
+  .gate-col-qtyavg { display: none; }
+}
+
+/* Imprint: custody sentence + sample disclosure, footer rule (drawn on load) */
+.gate-imprint {
+  position: relative;
+  margin-top: var(--sp-8); padding-top: var(--sp-4);
+}
+.gate-imprint::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 1px;
+  background: var(--gate-line); transform-origin: left; transform: scaleX(1);
+}
+.gate-imprint p { font-size: 12px; color: var(--gate-muted); line-height: 1.6; max-width: 68ch; }
+.gate-imprint p + p { margin-top: 4px; }
+
+/* ── Motion: one authored arrival, on load only. Visible-by-default base state;
+   the .gate-anim class (present from first paint) layers the entrance on top
+   via animation-fill-mode:backwards, so nothing depends on a second render
+   pass and nothing stays hidden if a rule fails to apply. ── */
+.gate-rail, .gate-name, .gate-name-rule, .gate-lede, .gate-accounts, .gate-actions,
+.gate-table-label, .gate-row, .gate-imprint, .gate-rail::after, .gate-imprint::before {
+  opacity: 1;
+}
+.gate.gate-anim .gate-rail { animation: gateFadeIn .35s var(--ease-out-quint) both; }
+.gate.gate-anim .gate-rail::after,
+.gate.gate-anim .gate-name-rule,
+.gate.gate-anim .gate-imprint::before { animation: gateRuleIn .3s .3s var(--ease-out-quint) both; }
+.gate.gate-anim .gate-name { animation: gateRiseIn .42s .08s var(--ease-out-expo) both; }
+.gate.gate-anim .gate-lede { animation: gateFadeIn .3s .32s var(--ease-out-quint) both; }
+.gate.gate-anim .gate-accounts { animation: gateFadeIn .3s .36s var(--ease-out-quint) both; }
+.gate.gate-anim .gate-actions { animation: gateFadeIn .3s .4s var(--ease-out-quint) both; }
+.gate.gate-anim .gate-table-label { animation: gateFadeIn .3s .34s var(--ease-out-quint) both; }
+.gate.gate-anim .gate-row { animation: gateRowIn .22s var(--ease-out-quint) both; }
+.gate.gate-anim .gate-imprint { animation: gateFadeIn .3s .55s var(--ease-out-quint) both; }
+@keyframes gateFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes gateRiseIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes gateRuleIn { from { opacity: 0; transform: scaleX(0); } to { opacity: 1; transform: scaleX(1); } }
+@keyframes gateRowIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) {
+  /* The blanket rule above already zeroes animation-duration, but a 0.01ms run
+     still briefly touches the keyframes' "from" state — make the gate's arrival
+     an explicit no-op instead of relying on that timing accident. */
+  .gate.gate-anim .gate-rail, .gate.gate-anim .gate-rail::after, .gate.gate-anim .gate-name,
+  .gate.gate-anim .gate-name-rule, .gate.gate-anim .gate-lede, .gate.gate-anim .gate-accounts,
+  .gate.gate-anim .gate-actions, .gate.gate-anim .gate-table-label, .gate.gate-anim .gate-row,
+  .gate.gate-anim .gate-imprint, .gate.gate-anim .gate-imprint::before {
+    animation: none !important; opacity: 1 !important; transform: none !important;
+  }
+}
+
+/* Mobile: single column, nameplate → lede → actions → table → imprint (DOM order) */
+@media (max-width: 899px) {
+  .gate-body { gap: var(--sp-7); }
+  .gate-right { margin-top: var(--sp-2); }
+}
 </style>
 </head>
 <body>
@@ -1996,7 +2229,7 @@ const _DOC_KEY      = 'folioDoc.v1';      // working copy — ACTIVE account onl
 const _SYNC_KEY     = 'folioSync.v1';     // { [sub]: { fileId, syncedRev } } — keyed per Google account
 const _ACCOUNTS_KEY = 'folioAccounts.v1'; // [{ sub, email, name, picture }] — every account ever signed in on this device
 const DEFAULT_PORT = 'Portfolio';     // the one portfolio every new user starts with
-const APP_NAME = 'Folio';             // working name — change here to rename the app
+const APP_NAME = 'Portfolio Tracker'; // confirmed app name
 
 function _emptyDoc() {
   return {
@@ -2584,43 +2817,136 @@ function _signInAccountsHtml() {
   if (!accounts.length) return '';
   const rows = accounts.map(a => {
     const pic = a.picture
-      ? `<img src="${a.picture}" alt="" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover">`
-      : `<span style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:13px;font-weight:700;color:var(--bg)">${(a.name || a.email || '?').charAt(0).toUpperCase()}</span>`;
+      ? `<img src="${a.picture}" alt="" referrerpolicy="no-referrer">`
+      : `<span style="display:flex;align-items:center;justify-content:center;width:100%;height:100%">${(a.name || a.email || '?').charAt(0).toUpperCase()}</span>`;
     return `
-      <button class="tx-btn" style="width:100%;display:flex;align-items:center;gap:10px;padding:9px 12px;text-align:left;margin-bottom:6px" onclick="switchAccount('${a.sub}')">
-        <span style="width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;background:var(--track)">${pic}</span>
-        <span style="min-width:0;overflow:hidden">
-          <span style="display:block;font-size:12px;font-weight:700;color:var(--ink);white-space:nowrap;text-overflow:ellipsis;overflow:hidden">${a.name || a.email}</span>
-          <span style="display:block;font-size:10px;color:var(--muted);white-space:nowrap;text-overflow:ellipsis;overflow:hidden">${a.email}</span>
+      <button class="gate-account-row" onclick="switchAccount('${a.sub}')">
+        <span class="gate-account-avatar">${pic}</span>
+        <span class="gate-account-text">
+          <span class="gate-account-name">${a.name || a.email}</span>
+          <span class="gate-account-email">${a.email}</span>
         </span>
       </button>`;
   }).join('');
   return `
-    <div style="margin-bottom:var(--sp-5);text-align:left">
-      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">${t('continue_as_label')}</div>
+    <div class="gate-accounts">
+      <div class="gate-accounts-label">${t('continue_as_label')}</div>
       ${rows}
-    </div>
-    <div style="font-size:11px;color:var(--muted);margin:0 0 var(--sp-4)">${t('or_label')}</div>`;
+    </div>`;
 }
 
+// ── Sign-in gate ──────────────────────────────────────────────────────────────
+// THESIS: the gate is a market page's nameplate, not a login card; it refuses the
+//   380px centered column every app ships.
+// OWN-WORLD: the app's own tokens inverted onto a deep ground that holds in all four
+//   themes; Newsreader at architectural scale, DM Sans for controls, mono figures on
+//   hairline rules, one structural accent.
+// STORY: a stranger reads the name, sees a real portfolio doing its job (gains and a
+//   loss), learns the data stays in their own Drive, then signs in or opens the demo.
+// FIRST VIEWPORT: imprint rail top; nameplate lower-left at display scale; ruled
+//   six-row specimen table to its right; actions under the nameplate; custody imprint
+//   as the footer rule.
+// FORM: masthead + tape, #4 of 7 grounded structures, seed 49eec599.
 function showSignInScreen() {
   const root = document.getElementById('root');
   if (!root) return;
   const noClient = !GOOGLE_CLIENT_ID;
+
+  // Hardcoded specimen — this screen renders before sign-in, so it never fetches
+  // quotes. Numbers are authored, not live: total value 45,001.20, total cost
+  // 32,450.10, +12,551.10, +38.7% — COST is the one loser on purpose.
+  const GATE_SAMPLE = [
+    { sym:'NVDA',  name:'NVIDIA',               qty:55, avg:92.10,  last:178.40, ret: 93.7 },
+    { sym:'GOOGL', name:'Alphabet',             qty:30, avg:141.60, last:196.85, ret: 39.0 },
+    { sym:'AAPL',  name:'Apple',                qty:40, avg:178.20, last:241.60, ret: 35.6 },
+    { sym:'MSFT',  name:'Microsoft',            qty:18, avg:352.40, last:468.15, ret: 32.8 },
+    { sym:'VOO',   name:'Vanguard S&P 500 ETF', qty:12, avg:452.80, last:598.30, ret: 32.1 },
+    { sym:'COST',  name:'Costco',               qty: 6, avg:705.30, last:668.90, ret: -5.2 },
+  ];
+
+  const usd = (typeof fmtUSD === 'function') ? fmtUSD
+    : (n) => '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const pct = (n) => (n >= 0 ? '+' : '') + n.toFixed(1) + '%';
+
+  // 40ms stagger, starting after the rail/nameplate/rules have begun (see
+  // .gate-row in the stylesheet for the shared duration/easing).
+  const rowsHtml = GATE_SAMPLE.map((p, i) => `
+    <tr class="gate-row" style="animation-delay:${(0.4 + i * 0.04).toFixed(2)}s">
+      <td class="gate-sym">${p.sym}</td>
+      <td class="gate-name-cell gate-col-name">${p.name}</td>
+      <td class="gate-qtyavg gate-col-qtyavg gate-num">${p.qty} × ${usd(p.avg)}</td>
+      <td class="gate-last gate-num">${usd(p.last)}</td>
+      <td class="gate-ret gate-num ${p.ret >= 0 ? 'gate-gain' : 'gate-loss'}">${pct(p.ret)}</td>
+    </tr>`).join('');
+  const totalDelay = (0.4 + GATE_SAMPLE.length * 0.04).toFixed(2);
+
+  // Derived from icons/icon.svg: ascending bars (currentColor, stepped opacity)
+  // plus the terracotta polyline + end dot (var(--gate-accent)) — inlined so it
+  // inherits colour instead of shipping a fixed-palette PNG.
+  const mark = `
+    <svg class="gate-mark" width="22" height="22" viewBox="0 0 512 512" aria-hidden="true" focusable="false">
+      <rect x="80"  y="310" width="64" height="120" rx="8" fill="currentColor" opacity=".55"/>
+      <rect x="168" y="245" width="64" height="185" rx="8" fill="currentColor" opacity=".68"/>
+      <rect x="256" y="182" width="64" height="248" rx="8" fill="currentColor" opacity=".82"/>
+      <rect x="344" y="105" width="64" height="325" rx="8" fill="currentColor"/>
+      <polyline points="112,310 200,245 288,182 376,105" stroke="var(--gate-accent)" stroke-width="18" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="376" cy="105" r="16" fill="var(--gate-accent)"/>
+    </svg>`;
+
   root.innerHTML = `
-    <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:var(--sp-6)">
-      <div style="max-width:380px;width:100%;text-align:center">
-        <div style="font-size:26px;font-weight:800;color:var(--ink);letter-spacing:-.5px;margin-bottom:var(--sp-2)">${APP_NAME}</div>
-        <div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:var(--sp-7)">${t('signin_tagline')}</div>
-        ${noClient ? '' : _signInAccountsHtml()}
-        ${noClient ? `<div style="font-size:12px;color:var(--loss);background:rgba(196,106,74,.1);padding:var(--sp-4);border-radius:8px;line-height:1.5">
-             Set <code>GOOGLE_CLIENT_ID</code> in index.html to enable sign-in.</div>`
-          : `<button id="signInBtn" class="tx-btn primary" style="width:100%;padding:12px" onclick="signInClick()">${t('signin_google')}</button>`}
-        <div style="margin-top:var(--sp-5)">
-          <button class="tx-btn" style="width:100%;padding:10px" onclick="startDemo()">${t('signin_demo')}</button>
+    <div class="gate gate-anim">
+      <header class="gate-rail">
+        <div class="gate-mark-wrap">
+          ${mark}
+          <span class="gate-wordmark">${APP_NAME}</span>
         </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:var(--sp-6);line-height:1.6">${t('signin_privacy')}</div>
+        <div class="gate-lang lang-toggle">
+          <button class="lang-seg${currentLang === 'EN' ? ' active' : ''}" onclick="setLang('EN')">EN</button>
+          <button class="lang-seg${currentLang === 'TH' ? ' active' : ''}" onclick="setLang('TH')">TH</button>
+        </div>
+      </header>
+      <div class="gate-body">
+        <div class="gate-left">
+          <h1 class="gate-name">${APP_NAME}</h1>
+          <div class="gate-name-rule"></div>
+          <p class="gate-lede">${t('gate_lede')}</p>
+          ${noClient ? '' : _signInAccountsHtml()}
+          <div class="gate-actions">
+            ${noClient
+              ? `<div class="gate-noclient">Set <code>GOOGLE_CLIENT_ID</code> in index.html to enable sign-in.</div>`
+              : `<button id="signInBtn" class="gate-btn gate-btn-primary" onclick="signInClick()">${t('signin_google')}</button>`}
+            <button class="gate-btn gate-btn-ghost" onclick="startDemo()">${t('signin_demo')}</button>
+          </div>
+        </div>
+        <div class="gate-right">
+          <div class="gate-table-label">${t('gate_sample_label')}</div>
+          <table class="gate-table">
+            <thead>
+              <tr>
+                <th scope="col" aria-label="${t('th_symbol')}"></th>
+                <th class="gate-col-name" scope="col"></th>
+                <th class="gate-col-qtyavg gate-num" scope="col">${t('qty_short')} × ${t('avg_short')}</th>
+                <th class="gate-num" scope="col">${t('gate_col_last')}</th>
+                <th class="gate-num" scope="col">${t('gate_col_return')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+              <tr class="gate-row gate-total-row" style="animation-delay:${totalDelay}s">
+                <td class="gate-sym">${t('gate_total')}</td>
+                <td class="gate-col-name"></td>
+                <td class="gate-col-qtyavg"></td>
+                <td class="gate-last gate-num">${usd(45001.20)}</td>
+                <td class="gate-ret gate-num gate-gain">${pct(38.7)}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="gate-sample-note">${t('gate_sample_note')}</div>
+        </div>
       </div>
+      <footer class="gate-imprint">
+        <p>${t('signin_privacy')}</p>
+      </footer>
     </div>`;
   root.setAttribute('aria-busy', 'false');
 }
@@ -3194,6 +3520,9 @@ const I18N = {
     signin_failed: "Sign-in failed. Please try again.",
     signin_demo: "Try the demo",
     signin_privacy: "Your data is stored in your own Google Drive, in a private folder only this app can read. We never see it.",
+    gate_lede: "Your holdings, transactions, plans and performance in one place. Sign in with Google and start adding positions — there is nothing to set up.",
+    gate_sample_label: "Sample portfolio", gate_sample_note: "Figures above are a sample, not live prices.",
+    gate_col_last: "Last", gate_col_return: "Return", gate_total: "Total",
     fetching_history_msg: "Fetching price history for {n} symbol(s)…",
     alloc_management_title: "Allocation Management",
     search_positions_placeholder: "Search positions & watchlist…",
@@ -3462,6 +3791,9 @@ const I18N = {
     signin_failed: "เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่",
     signin_demo: "ทดลองใช้งาน",
     signin_privacy: "ข้อมูลของคุณถูกเก็บใน Google Drive ของคุณเอง ในโฟลเดอร์ส่วนตัวที่มีเพียงแอปนี้อ่านได้ เราไม่เห็นข้อมูลของคุณ",
+    gate_lede: "ดูพอร์ต รายการซื้อขาย แผนการเทรด และผลตอบแทน ครบในที่เดียว เข้าสู่ระบบด้วย Google แล้วเริ่มเพิ่มหุ้นได้ทันที ไม่ต้องตั้งค่าอะไรเลย",
+    gate_sample_label: "พอร์ตตัวอย่าง", gate_sample_note: "ตัวเลขด้านบนเป็นข้อมูลตัวอย่าง ไม่ใช่ราคาจริง",
+    gate_col_last: "ราคาล่าสุด", gate_col_return: "ผลตอบแทน", gate_total: "รวม",
     fetching_history_msg: "กำลังดึงข้อมูลราคาย้อนหลัง {n} สัญลักษณ์…",
     // Allocation Management Modal
     alloc_management_title: "จัดการสัดส่วนการลงทุน",

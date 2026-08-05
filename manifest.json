@@ -1,6 +1,6 @@
 {
-  "name": "Folio",
-  "short_name": "Folio",
+  "name": "Portfolio Tracker",
+  "short_name": "Portfolio",
   "description": "Portfolio tracker — no setup, sign in with Google",
   "start_url": "./",
   "scope": "./",
