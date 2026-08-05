@@ -2656,6 +2656,98 @@ function _feesFor(tradeValue, commissionFree) {
   return { com: +com.toFixed(2), tax: +(com * 0.07).toFixed(2) };
 }
 
+/* ── editing / deleting a transaction ─────────────────────────────────────────
+   Both correct the holding and the cash balance, not just the ledger entry. Qty + avgPrice are
+   rebuilt by replaying the symbol's whole history (rolling average cost is path-dependent —
+   there is no arithmetic that un-applies a Buy that later Sells have already averaged over).
+   Cash moves by delta instead, since the balance also holds deposits, contributions and hand
+   edits that no ledger replay could reproduce.                                              */
+
+// Only these types are editable. Transfer-In/Out come in pairs (reverse one with Move shares)
+// and Dividend rows carry no holdings or cash effect. The UI hides the buttons; this rejects
+// them again on arrival.
+const TX_EDITABLE_TYPES = { 'Buy': true, 'Sell': true };
+
+// Proof that the caller's array index still addresses the transaction the panel rendered — a
+// delete splices every later index down by one, so a stale index would otherwise correct the
+// wrong symbol. Kept field-for-field identical to txExpectSig() on the render side.
+function _txFingerprint(tx) {
+  return [tx.date, String(tx.type || '').trim(), String(tx.ticker || '').toUpperCase(),
+          (Number(tx.shares) || 0).toFixed(6), (Number(tx.price) || 0).toFixed(6)].join('|');
+}
+
+// Replay one (symbol, portfolio)'s transactions into a position. Mirrors computeClosedTrades():
+// Buy / Transfer-In are buy-like and move the rolling average, Sell / Transfer-Out reduce qty
+// and leave the average alone, Dividend is not a share event.
+function _replayHolding(txs, sym, port) {
+  let qty = 0, avg = 0;
+  for (const tx of txs) {
+    if (String(tx.ticker || '').toUpperCase() !== sym) continue;
+    if ((tx.portfolio || DEFAULT_PORT) !== port) continue;
+    const sh = Number(tx.shares) || 0, px = Number(tx.price) || 0;
+    if (tx.type === 'Buy' || tx.type === 'Transfer-In') {
+      const nq = qty + sh;
+      avg = nq > 0 ? (qty * avg + sh * px) / nq : px;
+      qty = nq;
+    } else if (tx.type === 'Sell' || tx.type === 'Transfer-Out') {
+      qty = Math.max(0, qty - sh);
+    }
+  }
+  return { qty, avg };
+}
+
+// Signed share delta a transaction contributes to its position.
+function _txQtyDelta(type, shares) {
+  if (type === 'Buy'  || type === 'Transfer-In')  return shares;
+  if (type === 'Sell' || type === 'Transfer-Out') return -shares;
+  return 0;
+}
+
+// Cash a transaction moved: a Buy consumed its total, a Sell added it. Transfers move no money
+// and Dividend rows are inert — matching postTransactionUpdates, which only branches on Buy/Sell.
+function _txCashEffect(type, total) {
+  if (type === 'Buy')  return -total;
+  if (type === 'Sell') return  total;
+  return 0;
+}
+
+// Write the corrected position. Replays only when the PRE-change ledger reproduces the holding's
+// current qty; otherwise the doc holds shares this ledger never saw (a position entered by hand
+// before its trades were logged), so fall back to an exact qty delta and leave avgPrice alone
+// rather than rewriting a real holding down to whatever the partial history says. Returns true
+// when avgPrice was skipped.
+function _applyHoldingCorrection(d, sym, port, beforeTxs, afterTxs, qtyDelta) {
+  if (!sym) return false;
+  let h = d.holdings.find(x => x.symbol === sym && (x.portfolio || DEFAULT_PORT) === port);
+  const before = _replayHolding(beforeTxs, sym, port);
+  if (h && Math.abs((Number(h.qty) || 0) - before.qty) < 1e-6) {
+    const after = _replayHolding(afterTxs, sym, port);
+    h.qty = +after.qty.toFixed(6);
+    h.avgPrice = +after.avg.toFixed(6);
+    return false;
+  }
+  if (!h) {   // an edit that retargets the row at a symbol with no holding yet
+    h = { portfolio: port, symbol: sym, name: null, sector: null, industry: null,
+          category: null, qty: 0, avgPrice: 0, target: 0 };
+    d.holdings.push(h);
+  }
+  h.qty = +Math.max(0, (Number(h.qty) || 0) + qtyDelta).toFixed(6);
+  return true;
+}
+
+// Adjust one portfolio's FCD or USD balance, keeping cash = fcd + usd (as the updateCash case does).
+function _adjustPortfolioCash(d, port, field, delta) {
+  if (!delta) return;
+  const pf = d.portfolios.find(x => (x.name || x.id) === port);
+  if (!pf) return;
+  pf[field] = +((Number(pf[field]) || 0) + delta).toFixed(4);
+  pf.cash = +((Number(pf.fcd) || 0) + (Number(pf.usd) || 0)).toFixed(4);
+}
+
+// The ETF view has no cash of its own — its trades settle against the default portfolio,
+// matching cashCtxFor('ETF') and postTransactionUpdates.
+const _cashPortFor = port => port === 'ETF' ? DEFAULT_PORT : port;
+
 // Every mutation in the app funnels through here. Where this used to call Apps
 // Script, it now applies the same action to the local document and schedules a
 // Drive push — so all the call sites are unchanged.
@@ -2669,6 +2761,10 @@ async function recordFetch(params, needsResponse = false) {
   if (!_doc) return needsResponse ? { ok: false } : undefined;
 
   const findHolding = (d, sym, pf) => d.holdings.find(h => h.symbol === sym && (h.portfolio || DEFAULT_PORT) === pf);
+
+  // Cases that report more than a bare ok (tx edit/delete) set this; everything else falls
+  // through to the default { ok: true }.
+  let result = null;
 
   switch (action) {
     // ── transactions ──
@@ -2691,21 +2787,67 @@ async function recordFetch(params, needsResponse = false) {
       const tv = num('tradeValue') ?? +(shares * price).toFixed(4);
       const free = g('commissionFree') === 'TRUE';
       const { com, tax } = _feesFor(tv, free);
+      const old = _doc.transactions[i];
+      if (!old) { result = { ok: false, error: 'invalid row' }; break; }
+      if (g('expect') && _txFingerprint(old) !== g('expect')) { result = { ok: false, error: 'row_changed' }; break; }
+      const newType = g('type') || old.type;
+      if (!TX_EDITABLE_TYPES[old.type] || !TX_EDITABLE_TYPES[newType]) { result = { ok: false, error: 'type_not_editable' }; break; }
+
+      const oldSym = String(old.ticker || '').toUpperCase(), oldPort = old.portfolio || DEFAULT_PORT;
+      const oldType = old.type, oldShares = Number(old.shares) || 0, oldTotal = Number(old.total) || 0;
+      const newSym = (g('ticker') || old.ticker || '').toUpperCase();
+      const newPort = port;
+      const newTotal = +((newType === 'Sell' ? tv - com - tax : tv + com + tax)).toFixed(2);
+      const oldCash = -_txCashEffect(oldType, oldTotal);   // refund the original
+      const newCash =  _txCashEffect(newType, newTotal);   // charge the replacement
+      let avgSkipped = false;
+
       docMutate(d => {
-        const t0 = d.transactions[i];
-        if (!t0) return;
-        Object.assign(t0, {
-          date: g('date') || t0.date, time: g('time') ?? t0.time, type: g('type') || t0.type,
-          ticker: g('ticker') || t0.ticker, shares, price, tradeValue: tv, com, tax,
-          total: +((g('type') === 'Sell' ? tv - com - tax : tv + com + tax)).toFixed(2),
-          commissionFree: free,
+        const before = d.transactions.map(t => ({ ...t }));
+        Object.assign(d.transactions[i], {
+          date: g('date') || old.date, time: g('time') ?? old.time, type: newType,
+          ticker: newSym, shares, price, tradeValue: tv, com, tax,
+          total: newTotal, commissionFree: free, portfolio: newPort,
         });
+        const after = d.transactions;
+        // A ticker or portfolio change moves the row between two positions — correct both.
+        if (oldSym === newSym && oldPort === newPort) {
+          avgSkipped = _applyHoldingCorrection(d, newSym, newPort, before, after,
+            _txQtyDelta(newType, shares) - _txQtyDelta(oldType, oldShares));
+        } else {
+          const a = _applyHoldingCorrection(d, oldSym, oldPort, before, after, -_txQtyDelta(oldType, oldShares));
+          const b = _applyHoldingCorrection(d, newSym, newPort, before, after,  _txQtyDelta(newType, shares));
+          avgSkipped = a || b;
+        }
+        if (_cashPortFor(oldPort) === _cashPortFor(newPort)) {
+          _adjustPortfolioCash(d, _cashPortFor(newPort), 'usd', oldCash + newCash);
+        } else {
+          _adjustPortfolioCash(d, _cashPortFor(oldPort), 'usd', oldCash);
+          _adjustPortfolioCash(d, _cashPortFor(newPort), 'usd', newCash);
+        }
       });
+      result = { ok: true, symbol: newSym, avgSkipped, cashDelta: oldCash + newCash };
       break;
     }
     case 'delete': {
       const i = parseInt(g('row'), 10);
-      docMutate(d => { if (i >= 0 && i < d.transactions.length) d.transactions.splice(i, 1); });
+      const old = _doc.transactions[i];
+      if (!old) { result = { ok: false, error: 'invalid row' }; break; }
+      if (g('expect') && _txFingerprint(old) !== g('expect')) { result = { ok: false, error: 'row_changed' }; break; }
+      if (!TX_EDITABLE_TYPES[old.type]) { result = { ok: false, error: 'type_not_editable' }; break; }
+
+      const sym = String(old.ticker || '').toUpperCase(), oldPort = old.portfolio || DEFAULT_PORT;
+      const cashDelta = -_txCashEffect(old.type, Number(old.total) || 0);   // reverse what the trade did
+      let avgSkipped = false;
+
+      docMutate(d => {
+        const before = d.transactions.map(t => ({ ...t }));
+        d.transactions.splice(i, 1);
+        avgSkipped = _applyHoldingCorrection(d, sym, oldPort, before, d.transactions,
+          -_txQtyDelta(old.type, Number(old.shares) || 0));
+        _adjustPortfolioCash(d, _cashPortFor(oldPort), 'usd', cashDelta);
+      });
+      result = { ok: true, symbol: sym, avgSkipped, cashDelta };
       break;
     }
 
@@ -2837,7 +2979,7 @@ async function recordFetch(params, needsResponse = false) {
     default:
       console.warn('recordFetch: unhandled action', action);
   }
-  return needsResponse ? { ok: true } : undefined;
+  return needsResponse ? (result || { ok: true }) : undefined;
 }
 
 // ── i18n ─────────────────────────────────────────────────────────────────────
@@ -2883,6 +3025,11 @@ const I18N = {
     add_tranche_btn: "+ Add Tranche", stop_loss_label: "Stop Loss ($)",
     note_label: "Note", comm_free_label: "Commission-free",
     deduct_from_label: "Deduct from", save_sheet_btn: "Save",
+    tx_row_changed: "This transaction changed — refresh and try again.",
+    tx_type_locked: "Only Buy and Sell rows can be edited here.",
+    tx_avg_kept: "Qty updated — avg cost left as-is (partial history).",
+    tx_transfer_hint: "Reverse this with Move shares",
+    tx_dividend_hint: "Dividend rows can't be edited here",
     buy_label: "Buy", sell_label: "Sell", time_label: "Time",
     current_label: "Current", record_tx_btn: "Record Transaction",
     trade_value_label: "Trade Value", allocation_preview_label: "Allocation Preview",
@@ -3120,6 +3267,11 @@ const I18N = {
     add_tranche_btn: "+ เพิ่มไม้", stop_loss_label: "จุดตัดขาดทุน (SL)",
     note_label: "บันทึกเพิ่มเติม", comm_free_label: "ฟรีค่าธรรมเนียม",
     deduct_from_label: "ตัดเงินจาก", save_sheet_btn: "บันทึก",
+    tx_row_changed: "รายการนี้มีการเปลี่ยนแปลง — กรุณารีเฟรชแล้วลองใหม่",
+    tx_type_locked: "แก้ไขได้เฉพาะรายการซื้อและขายเท่านั้น",
+    tx_avg_kept: "อัปเดตจำนวนหุ้นแล้ว — ต้นทุนเฉลี่ยคงเดิม (ประวัติไม่ครบ)",
+    tx_transfer_hint: "ย้อนรายการนี้ด้วยการย้ายหุ้น",
+    tx_dividend_hint: "ไม่สามารถแก้ไขรายการปันผลที่นี่",
     buy_label: "ซื้อ", sell_label: "ขาย", time_label: "เวลา",
     current_label: "ปัจจุบัน", record_tx_btn: "บันทึกการเทรด",
     trade_value_label: "มูลค่าการเทรด",
@@ -3389,6 +3541,7 @@ let _nwDonutInclCash = localStorage.getItem('nwDonutCash.v1') !== 'off';  // Tot
 let shellBuilt = false;
 let _isDark = false;
 let txList = [], editingRow = null, txSortDir = -1, txSellAll = false;
+let _editOrigTx = null;   // the row as it was when the edit modal opened, for the impact line
 let actionModalSym = null, actionModalTab = 'edit';
 let tabDraft = {};
 let chartTimeFilter = 'ALL';
@@ -3408,6 +3561,7 @@ let txType = 'Buy';
 
 window.openAddTx = function(symbol) {
   editingRow = null;
+  _editOrigTx = null;
   txType = 'Buy';
   // Clear the trade modal to avoid duplicate ID conflicts (txShares/txPrice/txNoCommission/...)
   const tradeOverlay = document.getElementById('tradeModal');
@@ -3429,6 +3583,7 @@ window.setTxType = function(t) {
   const price  = parseFloat(document.getElementById('txPrice')?.value)  || 0;
   updateTxAllocationBars(shares, price);
   updateTxCashPreview();
+  updateTxEditImpact(shares, price);
   updateActionNewAvgLine();
   updateActionTxSummary();
 };
@@ -3563,6 +3718,7 @@ window.updateTxCalc = function() {
   if (el) el.textContent = fmtCurr(shares * price);
   updateTxAllocationBars(shares, price);
   updateTxCashPreview();
+  updateTxEditImpact(shares, price);
   updateActionNewAvgLine();
   updateActionTxSummary();
 };
@@ -3577,6 +3733,23 @@ window.selectTxCash = function(src) {
   });
   updateTxCashPreview();
 };
+
+// Live "what this edit will move" line in the edit modal. Cash always settles against USD
+// (see _cashPortFor / the update case in recordFetch).
+function updateTxEditImpact(shares, price) {
+  const el = document.getElementById('txEditImpact');
+  if (!el) return;
+  const o = _editOrigTx;
+  if (!o) { el.textContent = ''; return; }
+  const ticker = document.getElementById('txTicker')?.value.trim().toUpperCase() || o.ticker;
+  const { buyTotal, sellNet } = calcFees(shares * price);
+  const newTotal = txType === 'Buy' ? buyTotal : sellNet;
+  const dq = (txType === 'Buy' ? shares : -shares) - (o.type === 'Buy' ? o.shares : -o.shares);
+  const dc = (o.type === 'Buy' ? o.total : -o.total) + (txType === 'Buy' ? -newTotal : newTotal);
+  if (!dq && Math.abs(dc) < 0.005) { el.textContent = ''; return; }
+  const sign = n => n >= 0 ? '+' : '−';
+  el.textContent = `${ticker} ${sign(dq)}${+Math.abs(dq).toFixed(6)} sh · USD ${sign(dc)}${fmtUSD(Math.abs(dc))}`;
+}
 
 function calcFees(tv) {
   const noComm = document.getElementById('txNoCommission')?.checked;
@@ -3767,6 +3940,7 @@ function buildTxModal(defaultSymbol, editData) {
       <span>Trade Value: <strong id="txTradeValue">$0.00</strong></span>
       <span style="color:var(--muted);font-size:10px">Commission &amp; tax calculated by sheet</span>
     </div>
+    ${isEdit ? `<div id="txEditImpact" style="font-size:11px;color:var(--muted);margin-bottom:12px;text-align:right"></div>` : ''}
     <button class="tx-submit" id="txSubmit" onclick="${submitCall}">${submitLabel}</button>
     <div class="tx-status" id="txStatus"></div>
   </div>`;
@@ -3830,6 +4004,33 @@ async function fetchTxList() {
 const EDIT_ICON  = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`;
 const TRASH_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>`;
 
+// ── Editing / deleting a transaction ──────────────────────────────────────────
+// Editing or deleting a row now corrects the holding and the cash balance too, so both actions
+// carry a fingerprint of the row the panel rendered — a delete splices every later index down
+// by one, and a stale index would otherwise correct the wrong symbol. Must stay field-for-field
+// identical to _txFingerprint() on the store side.
+const TX_EDITABLE = ty => ty === 'Buy' || ty === 'Sell';
+const txExpectSig = tx => [tx.date, tx.type, (tx.ticker || '').toUpperCase(),
+                           (Number(tx.shares) || 0).toFixed(6),
+                           (Number(tx.price) || 0).toFixed(6)].join('|');
+
+// What deleting this row would do: reverse its share and cash effect. `tx.total` is the stored
+// trade-value-plus-fees, so this figure is exact.
+function txDeleteImpact(tx) {
+  const dq = tx.type === 'Buy' ? -tx.shares : tx.shares;
+  const dc = tx.type === 'Buy' ?  tx.total  : -tx.total;
+  const sign = n => n >= 0 ? '+' : '−';
+  return `${tx.ticker} ${sign(dq)}${Math.abs(dq)} sh · USD ${sign(dc)}${fmtUSD(Math.abs(dc))}`;
+}
+
+// Maps a store refusal to a readable line; null when the write went through.
+function txWriteError(res) {
+  if (!res || res.ok !== false) return null;
+  if (res.error === 'row_changed')       return t('tx_row_changed');
+  if (res.error === 'type_not_editable') return t('tx_type_locked');
+  return res.error || 'Failed';
+}
+
 function renderTxPanel(fullList) {
   const body = document.getElementById('txPanelBody');
   const countEl = document.getElementById('txPanelCount');
@@ -3840,23 +4041,29 @@ function renderTxPanel(fullList) {
   if (!list.length) { body.innerHTML = '<div class="tx-panel-status">No transactions yet.</div>'; return; }
   const sorted = [...list].sort((a,b) => txSortDir * ((a.date+a.time).localeCompare(b.date+b.time)));
 
-  const rows = sorted.map(t => {
-    const time = (t.time || '').slice(0,5);
-    const badge = t.type === 'Sell' ? 'tx-badge-sell' : 'tx-badge-buy';
-    return `<tr data-row="${t.row}">
-      <td><div class="tx-date-main">${fmtDate(t.date)}</div><div class="tx-date-sub">${time}</div></td>
-      <td style="text-align:left"><span class="${badge}">${t.type}</span></td>
-      <td style="text-align:left"><strong>${t.ticker}</strong></td>
-      <td>${t.shares}</td>
-      <td>${fmtCurr(t.price)}</td>
-      <td>${fmtCurr(t.tradeValue)}</td>
-      <td>${fmtCurr(t.com)}</td>
-      <td>${fmtCurr(t.tax)}</td>
-      <td><strong>${fmtCurr(t.total)}</strong></td>
-      <td><div class="tx-actions">
-        <button class="tx-action-btn" title="Edit" onclick="openEditTx(${t.row})">${EDIT_ICON}</button>
-        <button class="tx-action-btn danger" title="Delete" onclick="deleteTxRow(${t.row},this)">${TRASH_ICON}</button>
-      </div></td>
+  const rows = sorted.map(tx => {
+    const time = (tx.time || '').slice(0,5);
+    const badge = tx.type === 'Sell' ? 'tx-badge-sell' : 'tx-badge-buy';
+    // Transfer legs come in pairs (reverse one with Move shares) and Dividend rows have no
+    // holdings or cash effect to correct — neither is editable from here.
+    const actions = TX_EDITABLE(tx.type)
+      ? `<div class="tx-actions">
+          <button class="tx-action-btn" title="Edit" onclick="openEditTx(${tx.row})">${EDIT_ICON}</button>
+          <button class="tx-action-btn danger" title="Delete" onclick="deleteTxRow(${tx.row},this)">${TRASH_ICON}</button>
+        </div>`
+      : `<span style="color:var(--muted);font-size:11px" title="${
+          tx.type === 'Dividend' ? t('tx_dividend_hint') : t('tx_transfer_hint')}">—</span>`;
+    return `<tr data-row="${tx.row}">
+      <td><div class="tx-date-main">${fmtDate(tx.date)}</div><div class="tx-date-sub">${time}</div></td>
+      <td style="text-align:left"><span class="${badge}">${tx.type}</span></td>
+      <td style="text-align:left"><strong>${tx.ticker}</strong></td>
+      <td>${tx.shares}</td>
+      <td>${fmtCurr(tx.price)}</td>
+      <td>${fmtCurr(tx.tradeValue)}</td>
+      <td>${fmtCurr(tx.com)}</td>
+      <td>${fmtCurr(tx.tax)}</td>
+      <td><strong>${fmtCurr(tx.total)}</strong></td>
+      <td>${actions}</td>
     </tr>`;
   }).join('');
 
@@ -3887,12 +4094,13 @@ async function refreshTxPanel() {
 }
 
 window.openEditTx = function(row) {
-  const t = txList.find(x => x.row === row);
-  if (!t) return;
+  const tx = txList.find(x => x.row === row);
+  if (!tx || !TX_EDITABLE(tx.type)) return;
   editingRow = row;
-  txType = t.type === 'Sell' ? 'Sell' : 'Buy';
+  _editOrigTx = tx;
+  txType = tx.type === 'Sell' ? 'Sell' : 'Buy';
   const overlay = document.getElementById('txModal');
-  overlay.innerHTML = buildTxModal(null, t);
+  overlay.innerHTML = buildTxModal(null, tx);
   overlay.classList.add('open');
   updateTxCalc();
 };
@@ -3916,10 +4124,19 @@ window.submitEditTx = async function(row) {
       type: txType, ticker, shares, price,
       tradeValue: tv.toFixed(4), commissionFree: noCommission,
       portfolio: document.getElementById('txPortfolio')?.value || DEFAULT_PORT,
+      expect: _editOrigTx ? txExpectSig(_editOrigTx) : '',
     });
-    await recordFetch(params);
-    statusEl.innerHTML = '<span style="color:var(--gain)">✓ Saved</span>';
-    setTimeout(() => { closeTx(); setTimeout(() => { txCache = null; _allTxCache = null; refreshTxPanel(); init(); }, 1500); }, 800);
+    const res = await recordFetch(params, true);
+    const err = txWriteError(res);
+    if (err) {
+      statusEl.innerHTML = `<span style="color:var(--loss)">${err}</span>`;
+      document.getElementById('txSubmit').disabled = false;
+      return;
+    }
+    statusEl.innerHTML = res?.avgSkipped
+      ? `<span style="color:var(--gain)">✓ Saved</span> <span style="color:var(--muted);font-size:11px">${t('tx_avg_kept')}</span>`
+      : '<span style="color:var(--gain)">✓ Saved</span>';
+    setTimeout(() => { closeTx(); setTimeout(() => { txCache = null; _allTxCache = null; refreshTxPanel(); init(); }, 1500); }, res?.avgSkipped ? 2500 : 800);
   } catch(e) {
     statusEl.innerHTML = `<span style="color:var(--loss)">Error: ${e.message}</span>`;
     document.getElementById('txSubmit').disabled = false;
@@ -3929,11 +4146,15 @@ window.submitEditTx = async function(row) {
 window.deleteTxRow = function(row, btnEl) {
   const cell = btnEl.closest('td');
   if (!cell) return;
+  const tx = txList.find(x => x.row === row);
   if (!cell.dataset.original) cell.dataset.original = cell.innerHTML;
-  cell.innerHTML = `<div class="tx-confirm-row">
-    Delete?
-    <button class="tx-confirm-yes" onclick="confirmDeleteTx(${row},this)">Yes</button>
-    <button class="tx-confirm-no"  onclick="cancelDeleteTx(this)">No</button>
+  cell.innerHTML = `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
+    ${tx ? `<span style="font-size:10px;color:var(--muted);white-space:nowrap">${txDeleteImpact(tx)}</span>` : ''}
+    <div class="tx-confirm-row">
+      Delete?
+      <button class="tx-confirm-yes" onclick="confirmDeleteTx(${row},this)">Yes</button>
+      <button class="tx-confirm-no"  onclick="cancelDeleteTx(this)">No</button>
+    </div>
   </div>`;
 };
 window.cancelDeleteTx = function(btnEl) {
@@ -3942,11 +4163,25 @@ window.cancelDeleteTx = function(btnEl) {
 };
 window.confirmDeleteTx = async function(row, btnEl) {
   const cell = btnEl.closest('td');
+  const tx = txList.find(x => x.row === row);
   if (cell) cell.innerHTML = '<span style="color:var(--muted);font-size:11px">Deleting…</span>';
   try {
-    await recordFetch({ action: 'delete', row: String(row) });
-    _allTxCache = null;
-    setTimeout(refreshTxPanel, 700);
+    // needsResponse: the store can refuse (stale row / non-editable type) and can report that
+    // it kept the avg cost, none of which is visible through a fire-and-forget write.
+    const res = await recordFetch(
+      { action: 'delete', row: String(row), expect: tx ? txExpectSig(tx) : '' }, true);
+    const err = txWriteError(res);
+    if (err) {
+      if (cell) cell.innerHTML = `<span style="color:var(--loss);font-size:11px">${err}</span>`;
+      setTimeout(refreshTxPanel, 2500);
+      return;
+    }
+    txCache = null; _allTxCache = null;
+    // The holding and cash balance moved too, so the whole model has to be rebuilt — a panel
+    // refresh alone would leave the stat cards and positions showing the old numbers.
+    const notice = res?.avgSkipped ? t('tx_avg_kept') : '';
+    if (notice && cell) cell.innerHTML = `<span style="color:var(--muted);font-size:10px">${notice}</span>`;
+    setTimeout(() => { refreshTxPanel(); init(); }, notice ? 2500 : 700);
   } catch(e) {
     if (cell) cell.innerHTML = `<span style="color:var(--loss);font-size:11px">Failed</span>`;
   }
