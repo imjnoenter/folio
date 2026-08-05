@@ -2557,7 +2557,7 @@ const I18N = {
     all_stocks_label: "All Stocks", no_price_data: "No price data available",
     allocation: "Allocation", invested: "Invested", holdings: "Holdings",
     "All": "All", "Big Name": "Big Name", "Wait for sell": "Wait for sell", "Medium Cap": "Medium Cap", "Small Cap": "Small Cap",
-    "Growth": "Growth", "Dividend": "Dividend", "Other": "Other",
+    "Growth": "Growth", "Dividend": "Dividend", "Other": "Other", "ETF": "ETF",
     "Watchlist": "Watchlist", "Technology": "Technology",
     "Financials": "Financials", "Financial": "Financial",
     "Healthcare": "Healthcare", "Energy": "Energy",
@@ -2786,7 +2786,7 @@ const I18N = {
     allocation: "สัดส่วน", invested: "ทุน", holdings: "รายการ",
     "All": "ทั้งหมด", "Big Name": "หุ้นชื่อใหญ่", "Wait for sell": "รอขาย",
     "Medium Cap": "หุ้นขนาดกลาง", "Small Cap": "หุ้นขนาดเล็ก", "Growth": "หุ้นเติบโต",
-    "Dividend": "หุ้นปันผล", "Other": "อื่นๆ", "Watchlist": "รายการเฝ้าดู",
+    "Dividend": "หุ้นปันผล", "Other": "อื่นๆ", "ETF": "ETF", "Watchlist": "รายการเฝ้าดู",
     "Technology": "เทคโนโลยี", "Financials": "กลุ่มการเงิน",
     "Financial": "กลุ่มการเงิน", "Healthcare": "กลุ่มการแพทย์",
     "Energy": "กลุ่มพลังงาน", "Consumer Staples": "สินค้าจำเป็น",
@@ -5851,7 +5851,7 @@ function renderActionTabContent() {
     setTimeout(() => renderActionCharts(sym), 0);
 
   } else if (actionModalTab === 'allocation') {
-    const cats   = ['Big Name','Wait for sell','Medium Cap','Small Cap','Growth','Dividend'];
+    const cats   = ['Big Name','Wait for sell','Medium Cap','Small Cap','Growth','Dividend','ETF'];
     const curCat = pos?.category || '';
     const curTgt = pos?.target != null ? (pos.target*100).toFixed(1) : '';
     el.innerHTML = actionChartsHtml(sym) + `
@@ -8746,7 +8746,7 @@ function watchlistRow(w) {
 window.openAddSymbol = function() {
   const overlay = document.getElementById('addSymbolModal');
   if (!overlay) return;
-  const cats = ['Big Name','Wait for sell','Medium Cap','Small Cap','Growth','Dividend'];
+  const cats = ['Big Name','Wait for sell','Medium Cap','Small Cap','Growth','Dividend','ETF'];
   overlay.innerHTML = `<div class="tx-modal" style="max-width:400px" onclick="event.stopPropagation()">
     <div class="tx-header">
       <div class="tx-title">${t('add_symbol_title')}</div>
