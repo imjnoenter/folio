@@ -1,0 +1,3 @@
+# Local tooling / docs — not served by the app
+.claude/
+*.tmp
