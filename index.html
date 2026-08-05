@@ -478,6 +478,23 @@ body {
 .settings-row .theme-btn { width: 28px; height: 28px; }
 .settings-row .theme-btn svg { width: 14px; height: 14px; }
 
+/* ── Portfolio management (settings dropdown) ── */
+.port-mgmt-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 11px; width: 100%; }
+.port-mgmt-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.port-mgmt-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-family: var(--font-ui); }
+.port-mgmt-btn {
+  width: 22px; height: 22px; border: 1px solid var(--line); background: var(--track);
+  border-radius: var(--radius-sm); cursor: pointer; color: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center; padding: 0; flex-shrink: 0;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.port-mgmt-btn svg { width: 11px; height: 11px; }
+.port-mgmt-btn:hover { color: var(--terracotta); border-color: var(--terracotta); background: var(--hover); }
+.port-mgmt-btn.danger:hover { color: var(--loss); border-color: var(--loss); }
+.port-mgmt-add { display: flex; gap: 6px; width: 100%; margin-top: 4px; }
+.port-mgmt-add input { flex: 1; padding: 6px 8px; font-size: 12px; }
+.port-mgmt-err { font-size: 10px; color: var(--loss); margin-top: 2px; display: none; }
+
 /* ── IRR info popover ── */
 .irr-info-wrap { position: relative; display: inline-flex; }
 .irr-info-btn {
@@ -2751,6 +2768,16 @@ const I18N = {
     manage_label: "Manage",
     language_label: "Language", currency_label: "Currency", theme_label: "Theme", tone_label: "Tone", portfolios_label: "Portfolios",
     overview_label: "Overview", performance_label: "Performance",
+    // Portfolio management (create/rename/delete) + data export
+    port_add_placeholder: "New portfolio name", port_add_btn: "Add",
+    port_rename_title: "Rename", port_delete_title: "Delete",
+    port_err_empty: "Enter a portfolio name",
+    port_err_duplicate: "A portfolio with that name already exists",
+    port_err_reserved: "“ALL” is a reserved name",
+    port_err_has_holdings: "Can't delete — {n} holding(s) still in this portfolio",
+    port_err_last: "Can't delete the only portfolio",
+    port_delete_confirm: "Delete \"{name}\"? This will permanently remove {n} record(s) (transactions/contributions/plan).",
+    data_label: "Data", export_data_label: "Export data",
     // Rebalance funding aid (plan tab)
     rebalfund_title: "Fund", rebalfund_target_label: "Target",
     rebalfund_cash_label: "Cash to add", rebalfund_cash_warn: "Amount exceeds available cash",
@@ -3013,6 +3040,16 @@ const I18N = {
     manage_label: "จัดการ",
     language_label: "ภาษา", currency_label: "สกุลเงิน", theme_label: "ธีม", tone_label: "โทนสี", portfolios_label: "พอร์ตโฟลิโอ",
     overview_label: "ภาพรวม", performance_label: "ผลงาน",
+    // การจัดการพอร์ตโฟลิโอ (สร้าง/เปลี่ยนชื่อ/ลบ) + ส่งออกข้อมูล
+    port_add_placeholder: "ชื่อพอร์ตใหม่", port_add_btn: "เพิ่ม",
+    port_rename_title: "เปลี่ยนชื่อ", port_delete_title: "ลบ",
+    port_err_empty: "กรุณาใส่ชื่อพอร์ตโฟลิโอ",
+    port_err_duplicate: "มีพอร์ตโฟลิโอชื่อนี้อยู่แล้ว",
+    port_err_reserved: "\"ALL\" เป็นชื่อสงวน ใช้ไม่ได้",
+    port_err_has_holdings: "ลบไม่ได้ — ยังมี {n} รายการถือครองอยู่ในพอร์ตนี้",
+    port_err_last: "ลบไม่ได้ — เหลือพอร์ตโฟลิโอเดียว",
+    port_delete_confirm: "ลบ \"{name}\"? การกระทำนี้จะลบ {n} รายการถาวร (ธุรกรรม/เงินฝาก-ถอน/แผน)",
+    data_label: "ข้อมูล", export_data_label: "ส่งออกข้อมูล",
     // Rebalance funding aid (plan tab)
     rebalfund_title: "เติมเงิน", rebalfund_target_label: "เป้าหมาย",
     rebalfund_cash_label: "เงินสดที่เพิ่ม", rebalfund_cash_warn: "จำนวนเงินเกินเงินสดที่มีอยู่",
@@ -11060,6 +11097,7 @@ function renderPortVisToggles() {
       ${p.name}
     </label>`;
   }).join('');
+  renderPortManageList();
 }
 window.togglePortVis = function(name) {
   const hidden = getHiddenPorts();
@@ -11069,6 +11107,187 @@ window.togglePortVis = function(name) {
   const toggle = document.querySelector('.port-toggle');
   if (toggle) toggle.innerHTML = portToggleInnerHtml();
   renderPortVisToggles();
+};
+
+// ── Portfolio create / rename / delete ────────────────────────────────────────
+// Portfolios are keyed by NAME everywhere (holdings/transactions/contributions carry
+// a `.portfolio` name string, plans is keyed by name) — see CLAUDE.md. Rename/delete
+// therefore rewrite every reference inside a single docMutate so it can never half-apply.
+function _portMgmtError(msg) {
+  const el = document.getElementById('portMgmtErr');
+  if (!el) return;
+  if (!msg) { el.style.display = 'none'; el.textContent = ''; return; }
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function _portNameTaken(name, exclude) {
+  const low = name.toLowerCase();
+  return (_doc?.portfolios || []).some(p => (p.name || '').toLowerCase() === low && p.name !== exclude);
+}
+function renderPortManageList() {
+  const el = document.getElementById('portManageList');
+  if (!el || !_portfolioRegistry?.length) return;
+  el.innerHTML = _portfolioRegistry.map(p => {
+    const esc = p.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return `<div class="port-mgmt-row">
+      <span class="port-mgmt-dot" style="background:${p.color || 'var(--terracotta)'}"></span>
+      <span class="port-mgmt-name" title="${p.name}">${p.name}</span>
+      <button class="port-mgmt-btn" title="${t('port_rename_title')}" onclick="renamePortfolioPrompt('${esc}')">${EDIT_ICON}</button>
+      <button class="port-mgmt-btn danger" title="${t('port_delete_title')}" onclick="deletePortfolioPrompt('${esc}')">${TRASH_ICON}</button>
+    </div>`;
+  }).join('');
+}
+// Add/remove the header segmented toggle as the portfolio count crosses the
+// "hidden below 2" threshold (portfolioToggleHtml/portToggleInnerHtml), and keep
+// the Tweaks-panel lists (visibility + manage) in sync. Called after every mutation.
+function _refreshPortMgmtUI() {
+  renderPortVisToggles();   // also re-renders the manage list
+  const right = document.querySelector('.topbar-right');
+  let toggle = document.querySelector('.port-toggle');
+  if (_portfolioRegistry.length >= 2) {
+    if (toggle) {
+      toggle.innerHTML = portToggleInnerHtml();
+    } else if (right) {
+      const wrap = document.createElement('div');
+      wrap.innerHTML = portfolioToggleHtml();
+      toggle = wrap.firstElementChild;
+      if (toggle) right.insertBefore(toggle, document.getElementById('refreshBtn') || null);
+    }
+  } else if (toggle) {
+    toggle.remove();
+  }
+}
+
+// Pure validate+mutate — no DOM/confirm/prompt — so it can be driven directly
+// (UI wrappers below own the prompt()/confirm() and re-render).
+function renamePortfolio(oldName, newName) {
+  const name = (newName || '').trim();
+  if (!name) return { ok: false, error: 'port_err_empty' };
+  if (name.toLowerCase() === 'all') return { ok: false, error: 'port_err_reserved' };
+  if (name === oldName) return { ok: true, unchanged: true };
+  if (_portNameTaken(name, oldName)) return { ok: false, error: 'port_err_duplicate' };
+  docMutate(d => {
+    const pf = (d.portfolios || []).find(p => p.name === oldName);
+    if (!pf) return;
+    pf.name = name;
+    pf.id = name;
+    (d.holdings || []).forEach(h => { if (h.portfolio === oldName) h.portfolio = name; });
+    (d.transactions || []).forEach(tx => { if (tx.portfolio === oldName) tx.portfolio = name; });
+    (d.contributions || []).forEach(c => { if (c.portfolio === oldName) c.portfolio = name; });
+    if (d.plans && Object.prototype.hasOwnProperty.call(d.plans, oldName)) {
+      d.plans[name] = d.plans[oldName];
+      delete d.plans[oldName];
+    }
+  });
+  if (typeof _portfolioRegistry !== 'undefined') {
+    _portfolioRegistry = _portfolioRegistry.map(p => p.name === oldName ? { ...p, name, id: name } : p);
+  }
+  if (activePortfolio === oldName) {
+    activePortfolio = name;
+    try { localStorage.setItem('portfolioView.v1', name); } catch (_) {}
+  }
+  const hidden = getHiddenPorts();
+  const hi = hidden.indexOf(oldName);
+  if (hi >= 0) { hidden[hi] = name; setHiddenPorts(hidden); }
+  return { ok: true };
+}
+
+// Pure validate+mutate. Refuses when holdings exist or it's the last portfolio;
+// otherwise removes the registry row + plans[name] + its transactions/contributions
+// in one docMutate. Caller (deletePortfolioPrompt) owns the confirm() dialog.
+function deletePortfolio(name) {
+  const holdingsCount = (_doc?.holdings || []).filter(h => (h.portfolio || DEFAULT_PORT) === name).length;
+  if (holdingsCount > 0) return { ok: false, error: 'port_err_has_holdings', n: holdingsCount };
+  if ((_doc?.portfolios || []).length <= 1) return { ok: false, error: 'port_err_last' };
+  const txCount = (_doc?.transactions || []).filter(tx => (tx.portfolio || DEFAULT_PORT) === name).length;
+  const contribCount = (_doc?.contributions || []).filter(c => (c.portfolio || DEFAULT_PORT) === name).length;
+  docMutate(d => {
+    const i = (d.portfolios || []).findIndex(p => p.name === name);
+    if (i >= 0) d.portfolios.splice(i, 1);
+    if (d.plans) delete d.plans[name];
+    d.transactions = (d.transactions || []).filter(tx => (tx.portfolio || DEFAULT_PORT) !== name);
+    d.contributions = (d.contributions || []).filter(c => (c.portfolio || DEFAULT_PORT) !== name);
+  });
+  if (typeof _portfolioRegistry !== 'undefined') {
+    _portfolioRegistry = _portfolioRegistry.filter(p => p.name !== name);
+  }
+  if (activePortfolio === name) {
+    activePortfolio = 'ALL';
+    try { localStorage.setItem('portfolioView.v1', 'ALL'); } catch (_) {}
+  }
+  const hidden = getHiddenPorts();
+  const hi = hidden.indexOf(name);
+  if (hi >= 0) { hidden.splice(hi, 1); setHiddenPorts(hidden); }
+  return { ok: true, n: txCount + contribCount };
+}
+
+window.addPortfolio = async function() {
+  _portMgmtError('');
+  const input = document.getElementById('portAddInput');
+  const name = (input?.value || '').trim();
+  if (!name) return _portMgmtError(t('port_err_empty'));
+  if (name.toLowerCase() === 'all') return _portMgmtError(t('port_err_reserved'));
+  if (_portNameTaken(name)) return _portMgmtError(t('port_err_duplicate'));
+  const n = (_doc?.portfolios || []).length;
+  docMutate(d => {
+    (d.portfolios = d.portfolios || []).push({ id: name, name, color: PALETTE[n % PALETTE.length], cash: 0, cashRes: 0, fcd: 0, usd: 0 });
+  });
+  if (input) input.value = '';
+  await init();
+  _refreshPortMgmtUI();
+  _showToast(`${name} added`);
+};
+
+window.renamePortfolioPrompt = async function(oldName) {
+  _portMgmtError('');
+  const next = prompt(`${t('port_rename_title')}:`, oldName);
+  if (next == null) return; // cancelled
+  const res = renamePortfolio(oldName, next);
+  if (!res.ok) { _portMgmtError(t(res.error)); return; }
+  if (res.unchanged) return;
+  await init();
+  _refreshPortMgmtUI();
+};
+
+window.deletePortfolioPrompt = async function(name) {
+  _portMgmtError('');
+  const holdingsCount = (_doc?.holdings || []).filter(h => (h.portfolio || DEFAULT_PORT) === name).length;
+  if (holdingsCount > 0) { _portMgmtError(t('port_err_has_holdings').replace('{n}', holdingsCount)); return; }
+  if ((_doc?.portfolios || []).length <= 1) { _portMgmtError(t('port_err_last')); return; }
+  const txCount = (_doc?.transactions || []).filter(tx => (tx.portfolio || DEFAULT_PORT) === name).length;
+  const contribCount = (_doc?.contributions || []).filter(c => (c.portfolio || DEFAULT_PORT) === name).length;
+  const total = txCount + contribCount;
+  const msg = total > 0
+    ? t('port_delete_confirm').replace('{name}', name).replace('{n}', total)
+    : `${t('port_delete_title')} "${name}"?`;
+  if (!confirm(msg)) return;
+  const res = deletePortfolio(name);
+  if (!res.ok) { _portMgmtError(t(res.error).replace('{n}', res.n || '')); return; }
+  await init();
+  _refreshPortMgmtUI();
+  _showToast(`${name} deleted`);
+};
+
+// ── Export data (backup) ───────────────────────────────────────────────────────
+window.exportDocData = function() {
+  try {
+    const json = JSON.stringify(_doc, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `folio-backup-${dateStr}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    _showToast(t('export_data_label'));
+  } catch (e) {
+    _showToast('Export failed: ' + e.message);
+  }
 };
 
 // ── Settings dropdown ─────────────────────────────────────────────────────────
@@ -12192,6 +12411,16 @@ function buildShell() {
             <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
               <span class="settings-row-label">${t('portfolios_label') || 'Portfolios'}</span>
               <div id="portVisToggles" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+              <div id="portManageList" style="display:flex;flex-direction:column;width:100%"></div>
+              <div class="port-mgmt-add">
+                <input id="portAddInput" class="tx-input" placeholder="${t('port_add_placeholder')}" onkeydown="if(event.key==='Enter'){event.preventDefault();addPortfolio();}">
+                <button class="tw-reset" onclick="addPortfolio()">${t('port_add_btn')}</button>
+              </div>
+              <div id="portMgmtErr" class="port-mgmt-err"></div>
+            </div>
+            <div class="settings-row">
+              <span class="settings-row-label">${t('data_label')}</span>
+              <button class="tw-reset" onclick="exportDocData()">${t('export_data_label')}</button>
             </div>
           </div>
         </div>
