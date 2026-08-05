@@ -478,6 +478,36 @@ body {
 .settings-row .theme-btn { width: 28px; height: 28px; }
 .settings-row .theme-btn svg { width: 14px; height: 14px; }
 
+/* ── Settings → Account row ── */
+.settings-row.settings-row-account { flex-direction: column; align-items: stretch; gap: var(--sp-2); }
+.acct-current { display: flex; align-items: center; gap: var(--sp-3); padding-bottom: var(--sp-2); border-bottom: 1px solid var(--line); }
+.acct-avatar { width: 26px; height: 26px; border-radius: 50%; overflow: hidden; flex-shrink: 0; background: var(--track); }
+.acct-avatar-lg { width: 34px; height: 34px; }
+.acct-meta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.acct-name { font-size: 12px; font-weight: 700; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; }
+.acct-email { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; }
+.acct-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
+.acct-row { display: flex; align-items: center; gap: 4px; }
+.acct-row-main {
+  flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 5px 6px; border-radius: var(--radius-sm); border: 1px solid transparent;
+  background: none; cursor: pointer; text-align: left; font-family: var(--font-ui);
+  transition: background .15s, border-color .15s;
+}
+.acct-row-main:hover:not(:disabled) { background: var(--hover); }
+.acct-row-main:disabled { cursor: default; }
+.acct-row.is-active .acct-row-main { border-color: var(--terracotta); }
+.acct-row.is-active .acct-name { color: var(--terracotta); }
+.acct-remove {
+  flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%;
+  border: 1px solid var(--line); background: none; color: var(--muted);
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 0;
+  transition: color .15s, border-color .15s;
+}
+.acct-remove:hover { color: var(--loss); border-color: var(--loss); }
+.acct-actions { display: flex; gap: 6px; padding-top: 4px; }
+.acct-actions .tw-reset { flex: 1; }
+
 /* ── IRR info popover ── */
 .irr-info-wrap { position: relative; display: inline-flex; }
 .irr-info-btn {
@@ -1962,8 +1992,9 @@ let _contribCache = {}; // { [portfolio]: { depositTHB, withdrawUSD } }
 const GOOGLE_CLIENT_ID = '686454898079-2ofr9uqc23c6h13s7gkpctsc1qeg39fa.apps.googleusercontent.com';
 const DRIVE_FILE_NAME  = 'folio-data.json';
 const DRIVE_SCOPES     = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/userinfo.profile';
-const _DOC_KEY   = 'folioDoc.v1';     // working copy
-const _SYNC_KEY  = 'folioSync.v1';    // { fileId, syncedRev }
+const _DOC_KEY      = 'folioDoc.v1';      // working copy — ACTIVE account only
+const _SYNC_KEY     = 'folioSync.v1';     // { [sub]: { fileId, syncedRev } } — keyed per Google account
+const _ACCOUNTS_KEY = 'folioAccounts.v1'; // [{ sub, email, name, picture }] — every account ever signed in on this device
 const DEFAULT_PORT = 'Portfolio';     // the one portfolio every new user starts with
 const APP_NAME = 'Folio';             // working name — change here to rename the app
 
@@ -1971,6 +2002,7 @@ function _emptyDoc() {
   return {
     rev: 0,
     updatedAt: 0,
+    displayName: '',  // user-chosen override for the header title; '' falls back to the Google account name
     portfolios: [{ id: DEFAULT_PORT, name: DEFAULT_PORT, color: PALETTE[0], cash: 0, cashRes: 0, fcd: 0, usd: 0 }],
     holdings: [],      // { portfolio, symbol, name, sector, industry, category, qty, avgPrice, target, marketCap }
     transactions: [],  // { date, time, type, ticker, shares, price, tradeValue, com, tax, total, portfolio }
@@ -1981,11 +2013,11 @@ function _emptyDoc() {
 
 let _doc       = null;   // in-memory working copy
 let _demoMode  = false;  // true → nothing is ever persisted
-let _authUser  = null;   // { name, picture, email }
+let _authUser  = null;   // { sub, name, picture, email } — sub is the active account's key everywhere (folioUser)
 let _accessTok = null;   // { token, expiresAt }
 let _tokenClient = null;
 let _driveFileId = null;
-let _syncedRev   = 0;    // rev we last successfully pulled/pushed
+let _syncedRev   = 0;    // rev we last successfully pulled/pushed, for the ACTIVE account (_authUser.sub)
 let _pushTimer   = null;
 
 // ── working copy ──
@@ -2010,6 +2042,68 @@ function docMutate(fn) {
   schedulePush();
 }
 
+// ── remembered accounts (folioAccounts.v1) ──
+// Every Google account this device has ever signed into, so switching back
+// doesn't require a fresh OAuth consent flow. Keyed by `sub` (Google's stable
+// opaque account id) — never by email, which can change on a Google account.
+function _loadAccounts() {
+  try { return JSON.parse(localStorage.getItem(_ACCOUNTS_KEY) || '[]'); } catch (_) { return []; }
+}
+function _saveAccounts(list) {
+  try { localStorage.setItem(_ACCOUNTS_KEY, JSON.stringify(list)); } catch (_) {}
+}
+function _rememberAccount(user) {
+  if (!user?.sub) return;
+  const list = _loadAccounts();
+  const i = list.findIndex(a => a.sub === user.sub);
+  const entry = { sub: user.sub, email: user.email || '', name: user.name || '', picture: user.picture || '' };
+  if (i >= 0) list[i] = entry; else list.push(entry);
+  _saveAccounts(list);
+}
+
+// ── per-account sync state (folioSync.v1: { [sub]: { fileId, syncedRev } }) ──
+function _syncStoreRaw() {
+  try { return JSON.parse(localStorage.getItem(_SYNC_KEY) || 'null'); } catch (_) { return null; }
+}
+// Migrates the pre-multi-account flat shape { fileId, syncedRev } into the keyed
+// shape, attributing the orphaned entry to the currently active account instead
+// of dropping it — otherwise an upgrading user would look like they lost their
+// Drive file and a duplicate would get created under them.
+function _syncStoreMigrated() {
+  const store = _syncStoreRaw();
+  if (!store) return {};
+  const isFlatLegacy = ('fileId' in store) || ('syncedRev' in store);
+  if (!isFlatLegacy) return store;
+  const sub = _authUser?.sub;
+  if (!sub) return store; // don't know who to attribute it to yet — leave flat, retry once we do
+  const keyed = { [sub]: { fileId: store.fileId || null, syncedRev: store.syncedRev || 0 } };
+  try { localStorage.setItem(_SYNC_KEY, JSON.stringify(keyed)); } catch (_) {}
+  return keyed;
+}
+function _loadSyncStateForActiveAccount() {
+  const store = _syncStoreMigrated();
+  const sub = _authUser?.sub;
+  const entry = sub ? store[sub] : null;
+  _driveFileId = entry?.fileId || null;
+  _syncedRev   = entry?.syncedRev || 0;
+}
+function _syncStatePersist() {
+  const sub = _authUser?.sub;
+  if (!sub) return; // nothing to key it to (shouldn't happen while signed in)
+  try {
+    const store = _syncStoreMigrated();
+    store[sub] = { fileId: _driveFileId, syncedRev: _syncedRev };
+    localStorage.setItem(_SYNC_KEY, JSON.stringify(store));
+  } catch (_) {}
+}
+function _removeSyncStateFor(sub) {
+  try {
+    const store = _syncStoreMigrated();
+    delete store[sub];
+    localStorage.setItem(_SYNC_KEY, JSON.stringify(store));
+  } catch (_) {}
+}
+
 // ── auth ──
 function _authRestore() {
   try {
@@ -2017,12 +2111,8 @@ function _authRestore() {
     if (t && t.expiresAt > Date.now() + 60_000) _accessTok = t;
     const u = JSON.parse(localStorage.getItem('folioUser') || 'null');
     if (u) _authUser = u;
-    const s = JSON.parse(localStorage.getItem(_SYNC_KEY) || 'null');
-    if (s) { _driveFileId = s.fileId || null; _syncedRev = s.syncedRev || 0; }
+    _loadSyncStateForActiveAccount(); // also migrates the legacy flat folioSync.v1 shape, if any
   } catch (_) {}
-}
-function _syncStatePersist() {
-  try { localStorage.setItem(_SYNC_KEY, JSON.stringify({ fileId: _driveFileId, syncedRev: _syncedRev })); } catch (_) {}
 }
 function isSignedIn() { return !!(_accessTok && _accessTok.expiresAt > Date.now()); }
 
@@ -2037,7 +2127,11 @@ function _ensureTokenClient() {
 }
 
 // prompt:'' asks silently — succeeds without UI once the user has granted consent.
-function requestToken({ silent = false } = {}) {
+// `hint` (a login_hint, e.g. an email) and an explicit `prompt` (e.g. 'select_account'
+// for Add Account) are passed as per-call overrides to requestAccessToken() — the
+// GIS token client supports overriding prompt/hint/state per request without
+// recreating the client, so _tokenClient stays a single long-lived singleton.
+function requestToken({ silent = false, hint = null, prompt = null } = {}) {
   return new Promise((resolve, reject) => {
     const tc = _ensureTokenClient();
     if (!tc) return reject(new Error('gis-not-loaded'));
@@ -2047,7 +2141,11 @@ function requestToken({ silent = false } = {}) {
       try { sessionStorage.setItem('folioTok', JSON.stringify(_accessTok)); } catch (_) {}
       resolve(_accessTok.token);
     };
-    try { tc.requestAccessToken(silent ? { prompt: '' } : {}); }
+    const overrides = {};
+    if (prompt !== null) overrides.prompt = prompt;
+    else if (silent) overrides.prompt = '';
+    if (hint) overrides.hint = hint;
+    try { tc.requestAccessToken(overrides); }
     catch (e) { reject(e); }
   });
 }
@@ -2060,8 +2158,10 @@ async function fetchAuthUser() {
   const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: 'Bearer ' + tok } });
   if (!r.ok) return null;
   const u = await r.json();
-  _authUser = { name: u.name || '', picture: u.picture || '', email: u.email || '' };
+  _authUser = { sub: u.sub || '', name: u.name || '', picture: u.picture || '', email: u.email || '' };
   try { localStorage.setItem('folioUser', JSON.stringify(_authUser)); } catch (_) {}
+  _rememberAccount(_authUser);
+  _loadSyncStateForActiveAccount(); // now that sub is known, attribute/load this account's fileId+rev
   return _authUser;
 }
 async function signIn() {
@@ -2069,16 +2169,190 @@ async function signIn() {
   await fetchAuthUser();
   await syncPull({ initial: true });
 }
+
+// Flushes the OUTGOING account's pending debounced write, if any, while its
+// token is still valid — otherwise the queued push would fire after the token
+// (and _driveFileId) changed and write account A's edits to account B's file.
+// Returns false if the caller should ABORT the switch rather than proceed and
+// silently discard the edit.
+async function _flushOutgoingPush() {
+  clearTimeout(_pushTimer); _pushTimer = null;
+  if (_demoMode || !isSignedIn()) return true;
+  try { await syncPush(); return true; }
+  catch (_) { return false; }
+}
+
+// End the session on this device but keep it "remembered" — do NOT revoke the
+// grant and do NOT drop it from folioAccounts.v1 / folioSync.v1, so switching
+// back (from the sign-in screen's remembered-accounts row, or Settings → Account)
+// is a silent, one-click reconnect with no consent screen. Revoke is reserved
+// for Remove Account, which is the actually-destructive action.
 function signOut() {
-  if (_accessTok?.token) { try { google.accounts.oauth2.revoke(_accessTok.token); } catch (_) {} }
-  _accessTok = null; _authUser = null; _driveFileId = null; _syncedRev = 0; _doc = null;
+  clearTimeout(_pushTimer); _pushTimer = null;
+  _accessTok = null; _authUser = null; _doc = null; _driveFileId = null; _syncedRev = 0;
   try {
     sessionStorage.removeItem('folioTok');
     localStorage.removeItem('folioUser');
     localStorage.removeItem(_DOC_KEY);
-    localStorage.removeItem(_SYNC_KEY);
   } catch (_) {}
   location.reload();
+}
+
+// Switch to a remembered account. Silent-first with a login hint (no UI at all
+// if the browser still has a live Google session for it); falls back to an
+// interactive prompt only if the silent attempt fails. Reloads the page rather
+// than re-rendering in place: buildShell() (called from init()) does one-time
+// global setup (modal-dismiss listeners, a floating close button, a
+// MutationObserver) guarded by `shellBuilt` — invoking it a second time in the
+// same page life would duplicate that global state, so a fresh boot is the
+// safe way to fully switch identity. signOut()/removeAccount() use the same
+// pattern for the same reason.
+async function switchAccount(sub) {
+  if (_demoMode) return;
+  const target = _loadAccounts().find(a => a.sub === sub);
+  if (!target) return;
+  if (isSignedIn() && sub === _authUser?.sub) return; // already active
+
+  if (!(await _flushOutgoingPush())) { _showToast(t('switch_flush_failed')); return; }
+
+  try { await requestToken({ silent: true, hint: target.email }); }
+  catch (_) {
+    try { await requestToken({ silent: false, hint: target.email }); }
+    catch (e) { _showToast(t('switch_signin_failed')); return; }
+  }
+
+  // Only the ACTIVE account's document is cached locally.
+  try { localStorage.removeItem(_DOC_KEY); } catch (_) {}
+  _authUser = { sub: target.sub, name: target.name, email: target.email, picture: target.picture };
+  try { localStorage.setItem('folioUser', JSON.stringify(_authUser)); } catch (_) {}
+  location.reload();
+}
+
+// Add / sign in a Google account not yet remembered on this device.
+// prompt:'select_account' forces Google's account chooser rather than
+// silently reusing whichever session is currently live.
+async function addAccount() {
+  if (_demoMode) return;
+  if (!(await _flushOutgoingPush())) { _showToast(t('switch_flush_failed')); return; }
+
+  try { await requestToken({ silent: false, prompt: 'select_account' }); }
+  catch (e) { _showToast(t('signin_failed')); return; }
+
+  try { localStorage.removeItem(_DOC_KEY); } catch (_) {}
+  _authUser = null;
+  try { localStorage.removeItem('folioUser'); } catch (_) {}
+  try { await fetchAuthUser(); } catch (e) { _showToast(t('signin_failed')); return; }
+  location.reload();
+}
+
+// Forget a remembered account (destructive on this device — confirm first).
+// Revokes the grant only when it's the currently active account; a merely-
+// remembered, already-signed-out account has no live token to revoke.
+async function removeAccount(sub) {
+  if (_demoMode) return;
+  const accounts = _loadAccounts();
+  const acct = accounts.find(a => a.sub === sub);
+  if (!acct) return;
+  if (!confirm(t('remove_account_confirm').replace('{name}', acct.name || acct.email || ''))) return;
+
+  const wasActive = isSignedIn() && _authUser?.sub === sub;
+  if (wasActive && _accessTok?.token) {
+    try { google.accounts.oauth2.revoke(_accessTok.token); } catch (_) {}
+  }
+  _saveAccounts(accounts.filter(a => a.sub !== sub));
+  _removeSyncStateFor(sub);
+
+  if (!wasActive) { _refreshAccountSettingsRow(); return; } // just drop it from the list, in place
+
+  clearTimeout(_pushTimer); _pushTimer = null;
+  _accessTok = null; _authUser = null; _doc = null;
+  try {
+    sessionStorage.removeItem('folioTok');
+    localStorage.removeItem('folioUser');
+    localStorage.removeItem(_DOC_KEY);
+  } catch (_) {}
+  location.reload();
+}
+
+// ── Settings → Account row ──────────────────────────────────────────────────
+// Current account (custom display name, real email) + the remembered-accounts
+// list (real Google name/email always — never the custom name, so accounts
+// stay distinguishable from each other on a shared device) + Add/Sign out.
+function accountSettingsRowHtml() {
+  if (_demoMode) {
+    return `<span class="settings-row-label">${t('demo_mode_label')}</span>`;
+  }
+  const accounts = _loadAccounts();
+  const activeSub = _authUser?.sub;
+  const rows = accounts.map(a => {
+    const active = a.sub === activeSub;
+    const pic = a.picture
+      ? `<img src="${a.picture}" alt="" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover">`
+      : `<span style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:11px;font-weight:700;color:var(--bg)">${(a.name || a.email || '?').charAt(0).toUpperCase()}</span>`;
+    return `
+      <div class="acct-row${active ? ' is-active' : ''}">
+        <button class="acct-row-main" onclick="switchAccount('${a.sub}')" ${active ? 'disabled' : ''} title="${active ? t('active_account_label') : t('switch_account_label')}">
+          <span class="acct-avatar">${pic}</span>
+          <span class="acct-meta">
+            <span class="acct-name">${a.name || a.email}${active ? ' · ' + t('active_account_label') : ''}</span>
+            <span class="acct-email">${a.email}</span>
+          </span>
+        </button>
+        <button class="acct-remove" onclick="event.stopPropagation();removeAccount('${a.sub}')" title="${t('remove_account_label')}">×</button>
+      </div>`;
+  }).join('');
+  return `
+    <div class="settings-row-label" style="margin-bottom:6px">${t('account_settings_label')}</div>
+    <div class="acct-current">
+      <span class="acct-avatar acct-avatar-lg">${accountAvatarHtml()}</span>
+      <span class="acct-meta">
+        <span class="acct-name">${_doc?.displayName || _authUser?.name || APP_NAME}</span>
+        <span class="acct-email">${_authUser?.email || ''}</span>
+      </span>
+    </div>
+    <div class="acct-list">${rows}</div>
+    <div class="acct-actions">
+      <button class="tw-reset" onclick="addAccount()">${t('add_account_label')}</button>
+      <button class="tw-reset" onclick="signOut()">${t('sign_out')}</button>
+    </div>`;
+}
+function _refreshAccountSettingsRow() {
+  const el = document.getElementById('settingsAccountRow');
+  if (el) el.innerHTML = accountSettingsRowHtml();
+}
+
+// ── Editable header title (Task B: _doc.displayName) ────────────────────────
+// Overrides the header title shown throughout the app; falls back to the
+// Google account name, then APP_NAME, when unset. The avatar stays the Google
+// photo always — only the name is editable.
+function startEditHeaderTitle() {
+  if (_demoMode || !_doc) return;
+  const el = document.getElementById('headerTitle');
+  if (!el || el.tagName === 'INPUT') return;
+  const current = _doc?.displayName || _authUser?.name || APP_NAME;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'header-title-input';
+  input.value = current;
+  input.maxLength = 40;
+  input.setAttribute('aria-label', t('edit_display_name_label'));
+  el.replaceWith(input);
+  input.focus();
+  input.select();
+  let cancelled = false;
+  const commit = () => {
+    if (cancelled) return;
+    const val = input.value.trim();
+    input.replaceWith(el);
+    el.textContent = val || _authUser?.name || APP_NAME;
+    if (val !== (_doc.displayName || '')) docMutate(d => { d.displayName = val; });
+  };
+  const cancel = () => { cancelled = true; input.replaceWith(el); };
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
 }
 
 // ── Drive appData I/O ──
@@ -2271,9 +2545,13 @@ async function boot() {
     try { await requestToken({ silent: true }); } catch (_) {}
   }
   if (isSignedIn()) {
+    // Backfills `sub` for a pre-multi-account cached folioUser — and, via
+    // fetchAuthUser, migrates the legacy flat folioSync.v1 shape — before we
+    // pull, so the pull targets this account's real fileId/rev instead of a
+    // fresh/empty one.
+    if (!_authUser?.sub) { try { await fetchAuthUser(); } catch (_) {} }
     try { await syncPull({ initial: true }); }
     catch (_) { _doc = _docLoad() || _emptyDoc(); }   // offline → work from the local copy
-    if (!_authUser) { try { await fetchAuthUser(); } catch (_) {} }
   }
   init();
 }
@@ -2296,6 +2574,35 @@ function startDemo() {
   init();
 }
 
+// Remembered-accounts quick-reconnect row for the sign-in screen. Silent-first
+// with a login hint via switchAccount() — if the browser still has a live
+// Google session for that account, this is a genuine one-click reconnect with
+// no consent screen (the whole point of signOut() not revoking / not
+// forgetting the account).
+function _signInAccountsHtml() {
+  const accounts = _loadAccounts();
+  if (!accounts.length) return '';
+  const rows = accounts.map(a => {
+    const pic = a.picture
+      ? `<img src="${a.picture}" alt="" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover">`
+      : `<span style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:13px;font-weight:700;color:var(--bg)">${(a.name || a.email || '?').charAt(0).toUpperCase()}</span>`;
+    return `
+      <button class="tx-btn" style="width:100%;display:flex;align-items:center;gap:10px;padding:9px 12px;text-align:left;margin-bottom:6px" onclick="switchAccount('${a.sub}')">
+        <span style="width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;background:var(--track)">${pic}</span>
+        <span style="min-width:0;overflow:hidden">
+          <span style="display:block;font-size:12px;font-weight:700;color:var(--ink);white-space:nowrap;text-overflow:ellipsis;overflow:hidden">${a.name || a.email}</span>
+          <span style="display:block;font-size:10px;color:var(--muted);white-space:nowrap;text-overflow:ellipsis;overflow:hidden">${a.email}</span>
+        </span>
+      </button>`;
+  }).join('');
+  return `
+    <div style="margin-bottom:var(--sp-5);text-align:left">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">${t('continue_as_label')}</div>
+      ${rows}
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin:0 0 var(--sp-4)">${t('or_label')}</div>`;
+}
+
 function showSignInScreen() {
   const root = document.getElementById('root');
   if (!root) return;
@@ -2305,6 +2612,7 @@ function showSignInScreen() {
       <div style="max-width:380px;width:100%;text-align:center">
         <div style="font-size:26px;font-weight:800;color:var(--ink);letter-spacing:-.5px;margin-bottom:var(--sp-2)">${APP_NAME}</div>
         <div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:var(--sp-7)">${t('signin_tagline')}</div>
+        ${noClient ? '' : _signInAccountsHtml()}
         ${noClient ? `<div style="font-size:12px;color:var(--loss);background:rgba(196,106,74,.1);padding:var(--sp-4);border-radius:8px;line-height:1.5">
              Set <code>GOOGLE_CLIENT_ID</code> in index.html to enable sign-in.</div>`
           : `<button id="signInBtn" class="tx-btn primary" style="width:100%;padding:12px" onclick="signInClick()">${t('signin_google')}</button>`}
@@ -2725,6 +3033,14 @@ const I18N = {
     sync_this_device: "This device", sync_cloud_copy: "Cloud copy",
     sync_keep_this: "Keep this device", sync_use_cloud: "Use cloud copy",
     sign_out: "Sign out", demo_mode_label: "Demo mode — nothing is saved",
+    // Multi-account
+    account_settings_label: "Account", add_account_label: "Add account",
+    active_account_label: "Active", switch_account_label: "Switch to this account",
+    remove_account_label: "Remove account",
+    remove_account_confirm: "Remove {name} from this device? You'll need to sign in again to use it here.",
+    switch_flush_failed: "Couldn't save your changes before switching — please try again.",
+    switch_signin_failed: "Couldn't sign in to that account.",
+    edit_display_name_label: "Click to rename", continue_as_label: "Continue as", or_label: "or",
     // Sign-in gate
     signin_tagline: "Track your portfolio. Nothing to set up — sign in and start adding holdings.",
     signin_google: "Sign in with Google", signin_working: "Signing in…",
@@ -2980,6 +3296,14 @@ const I18N = {
     sync_this_device: "อุปกรณ์นี้", sync_cloud_copy: "ข้อมูลบนคลาวด์",
     sync_keep_this: "ใช้ของอุปกรณ์นี้", sync_use_cloud: "ใช้ของคลาวด์",
     sign_out: "ออกจากระบบ", demo_mode_label: "โหมดทดลอง — ไม่มีการบันทึกข้อมูล",
+    // Multi-account
+    account_settings_label: "บัญชี", add_account_label: "เพิ่มบัญชี",
+    active_account_label: "ใช้งานอยู่", switch_account_label: "สลับไปใช้บัญชีนี้",
+    remove_account_label: "ลบบัญชี",
+    remove_account_confirm: "ลบ {name} ออกจากอุปกรณ์นี้หรือไม่? คุณจะต้องเข้าสู่ระบบใหม่เพื่อใช้งานอีกครั้ง",
+    switch_flush_failed: "บันทึกการเปลี่ยนแปลงก่อนสลับบัญชีไม่สำเร็จ กรุณาลองใหม่",
+    switch_signin_failed: "เข้าสู่ระบบบัญชีนั้นไม่สำเร็จ",
+    edit_display_name_label: "คลิกเพื่อเปลี่ยนชื่อ", continue_as_label: "ดำเนินการต่อในชื่อ", or_label: "หรือ",
     // Sign-in gate
     signin_tagline: "ติดตามพอร์ตของคุณ ไม่ต้องตั้งค่าอะไร เพียงเข้าสู่ระบบแล้วเริ่มเพิ่มหุ้นได้เลย",
     signin_google: "เข้าสู่ระบบด้วย Google", signin_working: "กำลังเข้าสู่ระบบ…",
@@ -12138,7 +12462,7 @@ function buildShell() {
       <div class="sidebar-brand">
         <div class="brand-mark" aria-label="${APP_NAME}">${accountAvatarHtml()}</div>
         <div class="header-title-group">
-          <div class="header-title" id="headerTitle">${_authUser?.name || APP_NAME}</div>
+          <div class="header-title" id="headerTitle" onclick="startEditHeaderTitle()" title="${_demoMode ? '' : t('edit_display_name_label')}">${_doc?.displayName || _authUser?.name || APP_NAME}</div>
           <div class="header-sub">${t('portfolio')}</div>
         </div>
       </div>
@@ -12207,6 +12531,7 @@ function buildShell() {
               <span class="settings-row-label">${t('data_label')}</span>
               <button class="tw-reset" onclick="exportDocData()">${t('export_data_label')}</button>
             </div>
+            <div class="settings-row settings-row-account" id="settingsAccountRow">${accountSettingsRowHtml()}</div>
           </div>
         </div>
       </div>
@@ -13623,7 +13948,7 @@ async function init() {
       document.getElementById('root')?.setAttribute('aria-busy', 'false'); // terminal state — no longer loading
       const banner = document.createElement('div');
       banner.className = 'error-banner';
-      banner.innerHTML = `Failed to load: ${e.message}<br><small>Check the sheet is public. Tap your account name above to switch or edit your profile, or hit Refresh to retry.</small>`;
+      banner.innerHTML = `Failed to load: ${e.message}<br><small>Open Settings (⚙) to switch accounts, or hit Refresh to retry.</small>`;
       document.querySelector('.page-area')?.prepend(banner);
     } else {
       const el = document.getElementById('lastUpdated');
@@ -13808,13 +14133,6 @@ function isExtendedHours() {
       toggle('showShadow',    'Soft shadow'),
       `<div class="tw-section">Motion</div>`,
       slider('animationMs',   'Spin duration',    0, 2000, 50, 'ms'),
-      `<div class="tw-section">Account</div>`,
-      row(`<div style="font-size:11px;color:var(--muted);margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-        ${_demoMode ? t('demo_mode_label') : (_authUser?.email || _authUser?.name || '—')}
-      </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <button class="tw-reset" onclick="window.__tw_signOut()" style="flex:1">${t('sign_out')}</button>
-      </div>`),
     ].join('');
   }
 
@@ -13869,7 +14187,6 @@ function isExtendedHours() {
     try { window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*'); } catch(_) {}
   };
   window.__tw_reset = resetTweaks;
-  window.__tw_signOut = () => { hidePanel(); signOut(); };
 
   // Edit-mode protocol — listener FIRST, then announce
   window.addEventListener('message', e => {
