@@ -2010,6 +2010,23 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .gate-account-name { display: block; font-size: 12px; font-weight: 700; color: var(--gate-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gate-account-email { display: block; font-size: 10.5px; color: var(--gate-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* Blocked-popup help — sits directly above the sign-in button, since that button is the retry. */
+.gate-popup-help {
+  margin-bottom: var(--sp-5); padding: var(--sp-4);
+  border: 1px solid var(--gate-line); border-left: 3px solid var(--gate-accent);
+  border-radius: var(--radius-sm); background: var(--gate-ground-2);
+}
+.popup-help-title { font-size: 12px; font-weight: 700; color: var(--gate-ink); margin-bottom: 4px; }
+.popup-help-body { font-size: 11.5px; line-height: 1.5; color: var(--gate-muted); margin: 0; }
+.popup-kit { display: flex; flex-direction: column; gap: 8px; margin-top: var(--sp-4); }
+.pk-frame { display: flex; align-items: center; gap: 8px; }
+.pk-step {
+  flex-shrink: 0; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--gate-accent); color: var(--gate-ground);
+  font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+}
+.pk-art { flex: 1; min-width: 0; }
+.pk-art svg { display: block; width: 100%; height: auto; }
 .gate-actions { display: flex; gap: 12px; }
 .gate-btn {
   height: 48px; padding: 0 26px; border-radius: var(--radius-pill);
@@ -2362,7 +2379,8 @@ function _ensureTokenClient() {
   _tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
     scope: DRIVE_SCOPES,
-    callback: () => {},   // replaced per-request
+    callback: () => {},        // replaced per-request
+    error_callback: () => {},  // replaced per-request — declared here so GIS wires up the hook
   });
   return _tokenClient;
 }
@@ -2372,22 +2390,49 @@ function _ensureTokenClient() {
 // for Add Account) are passed as per-call overrides to requestAccessToken() — the
 // GIS token client supports overriding prompt/hint/state per request without
 // recreating the client, so _tokenClient stays a single long-lived singleton.
+// GIS opens a popup window for BOTH the interactive and the silent request (the silent one is
+// just invisible and self-closing). So a browser-level popup block breaks sign-in *and* the
+// startup re-connect. GIS reports that as error_callback({type:'popup_failed_to_open'}) and
+// never invokes `callback` — so without an error_callback this promise never settles, and every
+// awaiting caller hangs forever (the app sat on its loading skeleton with no explanation).
+// Rejections carry `.gisType` so callers can tell "popups are blocked" from "user closed it".
 function requestToken({ silent = false, hint = null, prompt = null } = {}) {
   return new Promise((resolve, reject) => {
     const tc = _ensureTokenClient();
     if (!tc) return reject(new Error('gis-not-loaded'));
+    let settled = false;
+    let watchdog = null;
+    const finish = fn => (...args) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog) clearTimeout(watchdog);
+      fn(...args);
+    };
+    const fail = finish((type, msg) => {
+      const err = new Error(msg || type || 'token-failed');
+      err.gisType = type || 'unknown';
+      reject(err);
+    });
+    const done = finish(resolve);
     tc.callback = (resp) => {
-      if (resp.error || !resp.access_token) return reject(new Error(resp.error || 'no-token'));
+      if (resp.error || !resp.access_token) return fail(resp.error || 'no-token');
       _accessTok = { token: resp.access_token, expiresAt: Date.now() + (resp.expires_in || 3600) * 1000 };
       try { sessionStorage.setItem('folioTok', JSON.stringify(_accessTok)); } catch (_) {}
-      resolve(_accessTok.token);
+      done(_accessTok.token);
     };
+    tc.error_callback = (err) => fail(err?.type, err?.message);
     const overrides = {};
     if (prompt !== null) overrides.prompt = prompt;
     else if (silent) overrides.prompt = '';
     if (hint) overrides.hint = hint;
+    // Watchdog on the SILENT path only. A silent request resolves in a second or two, so a
+    // stall means something went wrong that GIS didn't report — and the cost of not settling is
+    // a permanently blank app. The interactive path gets no watchdog on purpose: its callback
+    // fires only after the user finishes picking an account and consenting, which can take a
+    // while, and a timer there would kill a sign-in that was working fine.
+    if (silent) watchdog = setTimeout(() => fail('timeout', 'silent token request timed out'), 8000);
     try { tc.requestAccessToken(overrides); }
-    catch (e) { reject(e); }
+    catch (e) { fail(e?.type, e?.message); }
   });
 }
 async function getToken() {
@@ -2781,9 +2826,14 @@ function _waitForGis(ms = 4000) {
 async function boot() {
   _authRestore();
   await _waitForGis();
-  // Returning user: re-acquire a token silently so they never see a button again.
+  // Returning user: re-acquire a token silently so they never see a button again. A blocked
+  // popup breaks even this invisible request, so remember that reason — the gate renders the
+  // "allow popups" help straight away instead of making the user click sign-in to discover it.
+  // Every other failure (expired grant, offline, signed out of Google) is routine and just
+  // lands on the normal sign-in screen.
   if (!isSignedIn() && _authUser && GOOGLE_CLIENT_ID) {
-    try { await requestToken({ silent: true }); } catch (_) {}
+    try { await requestToken({ silent: true }); }
+    catch (e) { if (e?.gisType === 'popup_failed_to_open') _popupBlocked = true; }
   }
   if (isSignedIn()) {
     // Backfills `sub` for a pre-multi-account cached folioUser — and, via
@@ -2800,12 +2850,23 @@ async function boot() {
 async function signInClick() {
   const btn = document.getElementById('signInBtn');
   if (btn) { btn.disabled = true; btn.textContent = t('signin_working'); }
+  _popupBlocked = false;
+  _renderPopupHelp();
   try {
     await signIn();
     init();
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = t('signin_google'); }
-    _showToast(t('signin_failed'));
+    if (e?.gisType === 'popup_failed_to_open' || e?.gisType === 'popup_blocked_by_browser') {
+      // Retry is this same button: the popup needs a user gesture anyway, and Chrome's
+      // "always allow" applies immediately, so no reload is needed there.
+      _popupBlocked = true;
+      _renderPopupHelp();
+    } else if (e?.gisType === 'popup_closed') {
+      _showToast(t('signin_cancelled'));   // they closed it on purpose — no instructions needed
+    } else {
+      _showToast(t('signin_failed'));
+    }
   }
 }
 
@@ -2919,6 +2980,7 @@ function showSignInScreen() {
           <div class="gate-name-rule"></div>
           <p class="gate-lede">${t('gate_lede')}</p>
           ${noClient ? '' : _signInAccountsHtml()}
+          <div id="gatePopupHelp" class="gate-popup-help" role="alert" hidden></div>
           <div class="gate-actions">
             ${noClient
               ? `<div class="gate-noclient">Set <code>GOOGLE_CLIENT_ID</code> in index.html to enable sign-in.</div>`
@@ -2957,6 +3019,98 @@ function showSignInScreen() {
       </footer>
     </div>`;
   root.setAttribute('aria-busy', 'false');
+  _renderPopupHelp();   // startup may already know popups are blocked
+}
+
+/* ── Blocked-popup help ─────────────────────────────────────────────────────
+   Google's sign-in window is a popup, so a browser popup block stops sign-in dead — and
+   silently, which is the real problem: nothing on screen says what went wrong or how to
+   undo it. This renders the explanation plus a diagram of where the setting lives.       */
+let _popupBlocked = false;
+
+// Which set of instructions applies. iOS is checked first because Chrome on iPhone (CriOS)
+// still runs Safari's engine and Safari's popup blocker, so it needs the iOS steps, not
+// Chrome's. iPadOS reports itself as Macintosh, hence the touch-points check.
+function _popupPlatform() {
+  const ua = navigator.userAgent || '';
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'ios';
+  if (/Edg\/|Chrome\/|Chromium\//.test(ua) && !/Firefox/.test(ua)) return 'chromium';
+  return 'other';
+}
+
+// Two-frame diagram, drawn from the gate's own dark tokens so it sits in the gate's palette
+// in every theme. Inline SVG rather than an image: scales, themes, and works offline.
+function _popupHelpGraphic(platform) {
+  const frame = (n, label, inner) => `
+    <div class="pk-frame">
+      <span class="pk-step">${n}</span>
+      <div class="pk-art">
+        <svg viewBox="0 0 240 46" role="img" aria-label="${label}">${inner}</svg>
+      </div>
+    </div>`;
+
+  if (platform === 'chromium') {
+    // ① omnibox with the blocked-popup icon called out on the right
+    const bar = `
+      <rect x="4" y="11" width="232" height="24" rx="12" fill="var(--gate-ground-2)" stroke="var(--gate-line)"/>
+      <circle cx="19" cy="23" r="5" fill="none" stroke="var(--gate-muted)" stroke-width="1.4"/>
+      <path d="M19 20.5v5M16.5 23h5" stroke="var(--gate-muted)" stroke-width="1.2"/>
+      <rect x="32" y="20" width="122" height="6" rx="3" fill="var(--gate-line-2)"/>
+      <rect x="188" y="14" width="38" height="18" rx="5" fill="var(--gate-ground)" stroke="var(--gate-accent)" stroke-width="1.6"/>
+      <rect x="196" y="19" width="15" height="11" rx="2" fill="none" stroke="var(--gate-ink)" stroke-width="1.3"/>
+      <path d="M214.5 19.5l6 6M220.5 19.5l-6 6" stroke="var(--loss)" stroke-width="1.8" stroke-linecap="round"/>
+      <path d="M207 42c0-5 0-6 0-7" stroke="var(--gate-accent)" stroke-width="1.4" stroke-linecap="round"/>
+      <path d="M204 37l3 4 3-4" fill="var(--gate-accent)"/>`;
+    // ② the dropdown — the "always allow" radio is the one that must be picked, because the
+    //    panel opens on "continue blocking" and Done-without-choosing changes nothing.
+    const menu = `
+      <rect x="4" y="3" width="232" height="40" rx="6" fill="var(--gate-ground-2)" stroke="var(--gate-line)"/>
+      <circle cx="16" cy="15" r="4.5" fill="none" stroke="var(--gate-accent)" stroke-width="1.6"/>
+      <circle cx="16" cy="15" r="2.2" fill="var(--gate-accent)"/>
+      <rect x="26" y="12" width="150" height="5" rx="2.5" fill="var(--gate-ink)" opacity=".85"/>
+      <circle cx="16" cy="29" r="4.5" fill="none" stroke="var(--gate-line-2)" stroke-width="1.4"/>
+      <rect x="26" y="26" width="96" height="5" rx="2.5" fill="var(--gate-line-2)"/>
+      <rect x="190" y="23" width="38" height="14" rx="7" fill="var(--gate-accent)"/>`;
+    return `<div class="popup-kit">
+      ${frame(1, t('popup_help_alt_chrome_1'), bar)}
+      ${frame(2, t('popup_help_alt_chrome_2'), menu)}
+    </div>`;
+  }
+
+  if (platform === 'ios') {
+    // ① Settings → Safari row, ② Block Pop-ups switched OFF
+    const row = `
+      <rect x="4" y="6" width="232" height="34" rx="8" fill="var(--gate-ground-2)" stroke="var(--gate-line)"/>
+      <rect x="14" y="15" width="16" height="16" rx="4" fill="var(--gate-accent)" opacity=".85"/>
+      <rect x="38" y="20" width="52" height="6" rx="3" fill="var(--gate-ink)" opacity=".85"/>
+      <path d="M222 19l5 4-5 4" fill="none" stroke="var(--gate-muted)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
+    const toggle = `
+      <rect x="4" y="6" width="232" height="34" rx="8" fill="var(--gate-ground-2)" stroke="var(--gate-line)"/>
+      <rect x="14" y="20" width="86" height="6" rx="3" fill="var(--gate-ink)" opacity=".85"/>
+      <rect x="184" y="14" width="42" height="24" rx="12" fill="var(--gate-line-2)" stroke="var(--gate-line)"/>
+      <circle cx="196" cy="26" r="9" fill="var(--gate-ink)"/>`;
+    return `<div class="popup-kit">
+      ${frame(1, t('popup_help_alt_ios_1'), row)}
+      ${frame(2, t('popup_help_alt_ios_2'), toggle)}
+    </div>`;
+  }
+  return '';   // Firefox / desktop Safari — the text alone, no invented diagram
+}
+
+// Idempotent: rebuilds or clears the block in place. Safe to call on every gate render.
+function _renderPopupHelp() {
+  const el = document.getElementById('gatePopupHelp');
+  if (!el) return;
+  if (!_popupBlocked) { el.hidden = true; el.innerHTML = ''; return; }
+  const platform = _popupPlatform();
+  const steps = platform === 'chromium' ? t('popup_help_chrome')
+              : platform === 'ios'      ? t('popup_help_ios')
+              :                           t('popup_help_other');
+  el.innerHTML = `
+    <div class="popup-help-title">${t('popup_help_title')}</div>
+    <p class="popup-help-body">${steps}</p>
+    ${_popupHelpGraphic(platform)}`;
+  el.hidden = false;
 }
 
 // Flush pending edits when the tab goes away — a 2s debounce loses data otherwise.
@@ -3569,6 +3723,15 @@ const I18N = {
     signin_tagline: "Track your portfolio. Nothing to set up — sign in and start adding holdings.",
     signin_google: "Sign in with Google", signin_working: "Signing in…",
     signin_failed: "Sign-in failed. Please try again.",
+    signin_cancelled: "Sign-in cancelled.",
+    popup_help_title: "Your browser blocked the Google sign-in window",
+    popup_help_chrome: "Click the blocked-popup icon at the right of the address bar, choose “Always allow pop-ups and redirects from this site”, press Done — then press Sign in again.",
+    popup_help_ios: "Open the Settings app → Safari, turn off “Block Pop-ups”, then come back and reload this page.",
+    popup_help_other: "Allow pop-ups for this site in your browser settings, then press Sign in again.",
+    popup_help_alt_chrome_1: "Blocked-popup icon at the right of the Chrome address bar",
+    popup_help_alt_chrome_2: "Chrome dialog with “Always allow pop-ups” selected, then Done",
+    popup_help_alt_ios_1: "The Safari row in the iPhone Settings app",
+    popup_help_alt_ios_2: "The “Block Pop-ups” switch turned off",
     signin_demo: "Try the demo",
     signin_privacy: "Your data is stored in your own Google Drive, in a private folder only this app can read. We never see it.",
     gate_lede: "Your holdings, transactions, plans and performance in one place. Sign in with Google and start adding positions — there is nothing to set up.",
@@ -3843,6 +4006,15 @@ const I18N = {
     signin_tagline: "ติดตามพอร์ตของคุณ ไม่ต้องตั้งค่าอะไร เพียงเข้าสู่ระบบแล้วเริ่มเพิ่มหุ้นได้เลย",
     signin_google: "เข้าสู่ระบบด้วย Google", signin_working: "กำลังเข้าสู่ระบบ…",
     signin_failed: "เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่",
+    signin_cancelled: "ยกเลิกการเข้าสู่ระบบ",
+    popup_help_title: "เบราว์เซอร์บล็อกหน้าต่างเข้าสู่ระบบ Google",
+    popup_help_chrome: "คลิกไอคอนป๊อปอัปถูกบล็อกทางขวาของแถบที่อยู่ เลือก “Always allow pop-ups and redirects from this site” กด Done แล้วกดเข้าสู่ระบบอีกครั้ง",
+    popup_help_ios: "เปิดแอป Settings → Safari ปิด “Block Pop-ups” แล้วกลับมาโหลดหน้านี้ใหม่",
+    popup_help_other: "อนุญาตป๊อปอัปสำหรับเว็บไซต์นี้ในการตั้งค่าเบราว์เซอร์ แล้วกดเข้าสู่ระบบอีกครั้ง",
+    popup_help_alt_chrome_1: "ไอคอนป๊อปอัปถูกบล็อกทางขวาของแถบที่อยู่ใน Chrome",
+    popup_help_alt_chrome_2: "กล่องโต้ตอบ Chrome ที่เลือก “Always allow pop-ups” แล้วกด Done",
+    popup_help_alt_ios_1: "แถว Safari ในแอป Settings ของ iPhone",
+    popup_help_alt_ios_2: "สวิตช์ “Block Pop-ups” ที่ปิดอยู่",
     signin_demo: "ทดลองใช้งาน",
     signin_privacy: "ข้อมูลของคุณถูกเก็บใน Google Drive ของคุณเอง ในโฟลเดอร์ส่วนตัวที่มีเพียงแอปนี้อ่านได้ เราไม่เห็นข้อมูลของคุณ",
     gate_lede: "ดูพอร์ต รายการซื้อขาย แผนการเทรด และผลตอบแทน ครบในที่เดียว เข้าสู่ระบบด้วย Google แล้วเริ่มเพิ่มหุ้นได้ทันที ไม่ต้องตั้งค่าอะไรเลย",
